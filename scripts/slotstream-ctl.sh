@@ -13,6 +13,8 @@
 #   logs [n]            Tail the server log (default 50 lines).
 #   doctor [profile]    Run `slotstream doctor --json` for a profile. Refuses while the server is loaded.
 #   profile [name]      Show or persist the default profile in ~/.slotstream/profile.
+#   sync-opencode       Rewrite OpenCode's slotstream provider (port, context) to match the profile.
+#                       start/restart do this automatically.
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
@@ -22,6 +24,10 @@
 #                       Background task suite as a LaunchAgent (work.penz.slotstream-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
+# deep disables the prefill-wait budget (a full 65K prompt needs ~13 min before its first token);
+# the others keep SLOTSTREAM_MAX_PREFILL_WAIT (default 10 minutes).
+# While the server runs it holds `caffeinate -s` so an evening task is not cut off by idle sleep;
+# that assertion applies on AC power only. SLOTSTREAM_CAFFEINATE=0 disables it.
 #
 # Environment overrides:
 #   SLOTSTREAM_HOME (default ~/.slotstream)   SLOTSTREAM_BIN   SLOTSTREAM_PORT (11434)
@@ -40,7 +46,8 @@ fi
 SLOTSTREAM_BIN="${SLOTSTREAM_BIN:-$SLOTSTREAM_HOME/bin/slotstream}"
 SLOTSTREAM_PORT="${SLOTSTREAM_PORT:-11434}"
 SLOTSTREAM_MODEL="${SLOTSTREAM_MODEL:-qwen3.8-flash-next:4bit}"
-SLOTSTREAM_MAX_PREFILL_WAIT="${SLOTSTREAM_MAX_PREFILL_WAIT:-10}"
+SLOTSTREAM_MAX_PREFILL_WAIT_DEFAULT="${SLOTSTREAM_MAX_PREFILL_WAIT:-10}"
+SLOTSTREAM_CAFFEINATE="${SLOTSTREAM_CAFFEINATE:-1}"
 SLOTSTREAM_VISION="${SLOTSTREAM_VISION:-off}"
 OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 LOG="$SLOTSTREAM_HOME/slotstream.log"
@@ -106,11 +113,18 @@ check_disk() {
   return 0
 }
 
+prefill_wait_for() {
+  # $1 = context tokens. An explicit SLOTSTREAM_MAX_PREFILL_WAIT wins; otherwise deep (>= 65536) gets no budget.
+  if [[ -n "${SLOTSTREAM_MAX_PREFILL_WAIT:-}" ]]; then echo "$SLOTSTREAM_MAX_PREFILL_WAIT"
+  elif (( $1 >= 65536 )); then echo 0
+  else echo "$SLOTSTREAM_MAX_PREFILL_WAIT_DEFAULT"; fi
+}
+
 SERVE_ARGS=()
 serve_args() {
   # Fills SERVE_ARGS (bash 3.2 on macOS has no mapfile).
   local context="$1"
-  local args=(serve --model "$SLOTSTREAM_MODEL" --port "$SLOTSTREAM_PORT" --max-context "$context" --max-prefill-wait "$SLOTSTREAM_MAX_PREFILL_WAIT" --vision "$SLOTSTREAM_VISION")
+  local args=(serve --model "$SLOTSTREAM_MODEL" --port "$SLOTSTREAM_PORT" --max-context "$context" --max-prefill-wait "$(prefill_wait_for "$context")" --vision "$SLOTSTREAM_VISION")
   [[ -n "${SLOTSTREAM_MAX_RAM_PERCENT:-}" ]] && args+=(--max-ram-percent "$SLOTSTREAM_MAX_RAM_PERCENT")
   # shellcheck disable=SC2206
   [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && args+=($SLOTSTREAM_EXTRA_ARGS)
@@ -126,6 +140,28 @@ opencode_context() {
 opencode_port() {
   [[ -f "$OPENCODE_CONFIG" ]] || return 0
   awk '/"slotstream"[[:space:]]*:/{s=1} s&&/"baseURL"[[:space:]]*:/{match($0,/:[0-9]+\//); print substr($0,RSTART+1,RLENGTH-2); exit}' "$OPENCODE_CONFIG"
+}
+
+sync_opencode() {
+  # Rewrites port and context inside the slotstream provider block only. The file is JSONC,
+  # so this is a targeted text edit, not a JSON round-trip.
+  local context="$1"
+  [[ -f "$OPENCODE_CONFIG" ]] || return 0
+  local before; before="$(opencode_port):$(opencode_context)"
+  [[ "$before" == "$SLOTSTREAM_PORT:$context" ]] && return 0
+  cp "$OPENCODE_CONFIG" "$OPENCODE_CONFIG.bak"
+  python3 - "$OPENCODE_CONFIG" "$SLOTSTREAM_PORT" "$context" <<'PY'
+import re, sys
+path, port, ctx = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(path).read()
+i = s.find('"slotstream"')
+if i < 0: sys.exit(0)
+head, tail = s[:i], s[i:]
+tail = re.sub(r'("baseURL"\s*:\s*"http://[^:/"]+:)\d+(/v1")', lambda m: m.group(1) + port + m.group(2), tail, count=1)
+tail = re.sub(r'("context"\s*:\s*)\d+', lambda m: m.group(1) + ctx, tail, count=1)
+open(path, 'w').write(head + tail)
+PY
+  log "OpenCode slotstream provider set to port $SLOTSTREAM_PORT, context $context (was $before; backup $OPENCODE_CONFIG.bak). Restart OpenCode to apply."
 }
 
 warn_profile_mismatch() {
@@ -147,6 +183,11 @@ cmd_run() {
   check_port; check_disk
   warn_profile_mismatch "$context"
   serve_args "$context"
+  sync_opencode "$context"
+  if [[ "$SLOTSTREAM_CAFFEINATE" == 1 ]]; then
+    log "exec caffeinate -s $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
+    exec caffeinate -s "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}"
+  fi
   log "exec $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
   exec "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}"
 }
@@ -165,8 +206,11 @@ cmd_start() {
     check_port; check_disk; rotate_log
     warn_profile_mismatch "$context"
     serve_args "$context"
+    sync_opencode "$context"
     log "starting: $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
-    nohup "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}" >> "$LOG" 2>&1 &
+    if [[ "$SLOTSTREAM_CAFFEINATE" == 1 ]]; then nohup caffeinate -s "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}" >> "$LOG" 2>&1 &
+    else nohup "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}" >> "$LOG" 2>&1 &
+    fi
     echo $! > "$PID_FILE"
   fi
   cmd_wait_ready "${2:-180}"
@@ -372,6 +416,7 @@ case "${1:-}" in
   logs) tail -n "${2:-50}" "$LOG" ;;
   doctor) cmd_doctor "${2:-}" ;;
   profile) cmd_profile "${2:-}" ;;
+  sync-opencode) sync_opencode "$(resolve_profile "${2:-}")" ;;
   bundle) cmd_bundle ;;
   install-agent) cmd_install_agent ;;
   uninstall-agent) cmd_uninstall_agent ;;

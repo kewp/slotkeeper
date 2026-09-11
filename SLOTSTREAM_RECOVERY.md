@@ -98,7 +98,7 @@ survives after a toast is replaced.
 
 ## Installed Build Snapshot
 
-Installed 2026-09-11 17:35 CEST from stock 0.2.14 source plus both repo patches
+Installed 2026-09-11 17:42 CEST from stock 0.2.14 source plus both repo patches
 (`patches/slotstream-0.2.14-opencode-retry.patch`, then
 `patches/slotstream-0.2.14-stale-pressure.patch`), built with
 `make checks && make build` (Xcode 26.4.1, Swift 6.3.1). T0: `34 passed, 0
@@ -108,11 +108,11 @@ experts/layer, 4 GB pool, 10.9 GB expected peak.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `slotstream` | `bcdbeaac485bcce68f1b35af66e251a6ec90bd37755b3073b99fa862d9b3877b` |
+| `slotstream` | `8880416ad243827e9af6c129ad5bdb248118c5655ad48d41fa3c58ef37f41cb2` |
 | `mlx.metallib` | `198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597` |
 
 ```text
-~/.slotstream/bin -> releases/slotstream-0.2.14-local-20260911173510
+~/.slotstream/bin -> releases/slotstream-0.2.14-local-20260911174205
 ```
 
 Previous releases stay under `~/.slotstream/releases/` for rollback:

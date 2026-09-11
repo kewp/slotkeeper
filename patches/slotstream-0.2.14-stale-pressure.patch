@@ -1,6 +1,6 @@
 diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/Slotstream/Engine.swift src-patched/Sources/Slotstream/Engine.swift
 --- a/Sources/Slotstream/Engine.swift	2026-09-11 17:31:53
-+++ b/Sources/Slotstream/Engine.swift	2026-09-11 17:31:54
++++ b/Sources/Slotstream/Engine.swift	2026-09-11 17:38:50
 @@ -148,7 +148,14 @@
              slackBytes: Int(Planner.availabilitySlackGB(ramGB: currentPlan?.ramGB ?? Planner.deviceRAMGB()) * 1e9),
              connected: connected, pressure: { [weak self] in
@@ -12,29 +12,32 @@ diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/Slotstream/Engin
 +                let available = Planner.deviceAvailableGB()
 +                let refuse = RequestPressurePolicy.refuses(
 +                    osPressure: true, availableGB: available, ramGB: self.currentPlan?.ramGB ?? Planner.deviceRAMGB())
-+                if !refuse { self.noteStalePressure(availableGB: available) }
++                self.notePressureDecision(refused: refuse, availableGB: available)
 +                return refuse
              })
          try control.attachReservations(requestReservations)
          return control
-@@ -180,6 +187,21 @@
+@@ -180,6 +187,24 @@
  
      private let osPressureLock = NSLock()
      private var osPressure = false
 +    private var stalePressureLoggedAt: Date?
 +
-+    /// Logs (at most once a minute) that a latched OS pressure level was
-+    /// overridden by reclaimable memory, so the operator can see the OS signal
-+    /// and the engine's reading disagree.
-+    private func noteStalePressure(availableGB: Double?) {
++    /// Logs (at most once a minute) how a latched OS pressure level was
++    /// resolved against reclaimable memory, so the operator can see the OS
++    /// signal, the engine's reading and the decision together.
++    private func notePressureDecision(refused: Bool, availableGB: Double?) {
 +        let shouldLog = osPressureLock.withLock { () -> Bool in
 +            if let at = stalePressureLoggedAt, -at.timeIntervalSinceNow < 60 { return false }
 +            stalePressureLoggedAt = Date(); return true
 +        }
 +        guard shouldLog else { return }
 +        let gb = availableGB.map { String(format: "%.1f", $0) } ?? "?"
-+        FileHandle.standardError.write(
-+            "memory pressure: OS level still elevated but \(gb) GB reclaimable; treating it as stale and admitting requests\n".data(using: .utf8)!)
++        let threshold = String(format: "%.1f", RequestPressurePolicy.staleThresholdGB(ramGB: currentPlan?.ramGB ?? Planner.deviceRAMGB()))
++        let line = refused
++            ? "memory pressure: OS level elevated and only \(gb) GB reclaimable (stale threshold \(threshold) GB); refusing requests\n"
++            : "memory pressure: OS level still elevated but \(gb) GB reclaimable (stale threshold \(threshold) GB); treating it as stale and admitting requests\n"
++        FileHandle.standardError.write(line.data(using: .utf8)!)
 +    }
      private var pressureMonitor: DispatchSourceMemoryPressure?
  
