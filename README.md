@@ -101,8 +101,10 @@ alone, which can stay elevated after the pressure is gone, and it retains
 only a tenth of the pool budget as conversation state, so on a small Mac a
 long coding session re-prefills its whole history every turn. Its elastic
 cache also regrows straight back to a size that just met memory pressure,
-which fails the next long prompt. Four patches against 0.2.14 source fix
-that, each with new assertions in Slotstream's own T0 check suite. None is
+which fails the next long prompt. It also throws away a long prompt's prefill when it
+refuses the request, so the retry starts over. Five patches against 0.2.14
+source fix that, each with new assertions in Slotstream's own T0 check
+suite. None is
 needed for anything else here.
 One command does it, about five minutes with Xcode or the Command Line Tools
 installed:

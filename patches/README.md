@@ -1,11 +1,11 @@
 # Slotstream patches
 
-Four patches against [Slotstream](https://github.com/carloslfu/slotstream)
+Five patches against [Slotstream](https://github.com/carloslfu/slotstream)
 0.2.14 source. Apply in this order (alphabetical, which is what
 `scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
 candidate for an upstream pull request. All four apply cleanly to a stock
-0.2.14 tree in that order (verified 2026-09-11) and pass Slotstream's T0
-check suite (`make checks`, 34 checks, 25,436 assertions) with the new
+0.2.14 tree in that order (verified 2026-09-12) and pass Slotstream's T0
+check suite (`make checks`, 34 checks, 25,450 assertions) with the new
 checks included.
 
 | Patch | What it changes | New check |
@@ -13,6 +13,7 @@ checks included.
 | `slotstream-0.2.14-opencode-retry.patch` | Pre-output memory-pressure failures say `try your request again`, which OpenCode's retry classifier recognises; post-output failures keep the non-retryable wording so a replay cannot duplicate text or tool effects. Non-cancellation request failures are logged to stderr. | assertions added to `context-serving` (queued-pressure and governor-unavailable pre-output paths) |
 | `slotstream-0.2.14-prefix-retention.patch` | `serve --prefix-cache-tokens <n\|full>` (or `SLOTSTREAM_PREFIX_CACHE_TOKENS`) sets how much conversation state the prefix cache may retain. The planner caps it at the context window, charges it against the expert pool before sizing experts, refuses at startup if the pool would fall below its floor, and reports it in `/api/show` as `runtime_prefix_cache_tokens`. The governor keeps the explicit ceiling across resizes. | assertions added to `prefix-client-capacity` (window cap, pool charge, peak unchanged, `--no-prefix-cache` precedence, invalid values, governor shed, refusal at the floor) |
 | `slotstream-0.2.14-pressure-ceiling.patch` | After an OS pressure event the elastic governor remembers the pool that met it, and for 20 minutes will not regrow past 1 GB below it. Repeated events ratchet the ceiling down; an availability shrink is never blocked; the ceiling is forgotten after the window. | assertions added to `governor-check` (regrowth capped, reason string, cooldown still applies, forgotten after the window, no effect when above the replan, dead-band respected, shrink unaffected, ratchet) |
+| `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. Execution errors still keep nothing. A governor shrink no longer drops a large retained prefix before it sheds the expert pool. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state) and `governor-check` (drop order at and above the floor) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
 
 ## Apply and build
@@ -33,7 +34,7 @@ Manually:
 ```sh
 tar -xzf build-source.tar.gz            # or a stock 0.2.14 checkout
 cd <source>
-for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-prefix-retention slotstream-0.2.14-pressure-ceiling slotstream-0.2.14-stale-pressure; do
+for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-prefix-retention slotstream-0.2.14-pressure-ceiling slotstream-0.2.14-resume-after-refusal slotstream-0.2.14-stale-pressure; do
   patch --dry-run --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
   patch --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
 done
@@ -94,6 +95,17 @@ pressure shrinks, and the next 8K and 24K prefills failed at prefill commit
 both times. Decode speed barely depends on the pool in that range (3.05
 tok/s median at 25 per layer, 3.42 at 43), so holding a smaller pool for a
 while after pressure is cheap and removes the oscillation.
+
+**Resume after a refusal.** Measured on the deep (65,536) profile on
+2026-09-12: a 56K prompt was refused 19 minutes in, at 76% of its prefill,
+by the admission check between passes, with the machine at normal pressure
+throughout. All 19 minutes were lost, and the retry would have repeated
+them. The state at that moment sits exactly on a whole-stack commit
+boundary, which is the same thing the cancellation path already publishes to
+the prefix cache, so the fix is to publish it for boundary-safe failures
+too. The governor change is the same argument: at a long window, rebuilding
+a 48K prefix costs 16 minutes while the expert pool it was sacrificed for
+refills from SSD as requests run.
 
 ## Upstream pull request text
 
@@ -188,9 +200,40 @@ while after pressure is cheap and removes the oscillation.
 > replan, the dead-band, an availability shrink with a ceiling set, and the
 > ratchet.
 
+### PR 5: Keep the committed prefix when a request is refused at a pass boundary
+
+> A long prefill can be refused between passes, by the admission check or a
+> pressure interruption, after most of the prompt has already been read. The
+> state then sits on a whole-stack commit boundary and is still valid, but it
+> is discarded, so the client's retry re-reads the prompt from the start. On a
+> 24 GB M4 Pro at a 65,536-token window, a 56K prompt was refused 19 minutes
+> in at 76%; the retry would have paid all of it again, and can fail at the
+> same place indefinitely.
+>
+> `RequestFailure.retainsCommittedPrefix` names the failures raised at a
+> boundary rather than inside a forward (memory, wait and deadline refusals,
+> client cancellation, context length). For those, the prefill's early-exit
+> path publishes `promptIds.prefix(i)` to the prefix cache exactly as the
+> cancellation path already does, guarded by the same `state.tokenCount == i`
+> plus `committedBoundaryValid`. Execution errors keep nothing, as before.
+> The server logs how many tokens it kept.
+>
+> The governor also no longer drops retained conversations on every shrink.
+> `shouldDropRetainedPrefix` keeps them when more than 8,192 tokens are held
+> and the pool has not reached its floor, because a long prefix costs minutes
+> of prefill to rebuild while the pool refills from SSD as requests run.
+>
+> Tests: assertions added to `prefix-client-capacity` (per-code retention,
+> controller state after a refusal versus an execution error) and
+> `governor-check` (drop order at, above and at the boundary of the protected
+> size).
+
 ## Status
 
-2026-09-11 22:42: all four patches installed as release
+2026-09-12 00:41: all five patches installed as release
+`slotstream-0.2.14-local-20260912004057`, on the deep (65,536) profile.
+
+2026-09-11 22:42: the first four installed as release
 `slotstream-0.2.14-local-20260911224202`. `ctl.env` also sets
 `SLOTSTREAM_MAX_RAM_PERCENT=45` (see `LOCAL_LLM_ROADMAP.md` for the sweep
 that motivated it). With that cap the governor has little room to

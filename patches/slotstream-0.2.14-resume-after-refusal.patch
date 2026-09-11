@@ -1,0 +1,162 @@
+diff -ruN a/Sources/Slotstream/Generate.swift b/Sources/Slotstream/Generate.swift
+--- a/Sources/Slotstream/Generate.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/Generate.swift	2026-09-12 00:38:37
+@@ -727,13 +727,25 @@
+                 // and consumed span, never identities of future images.
+                 Stream.gpu.synchronize()
+                 model.pool.unpinAll()
+-                if request?.mayRetainState != false, i > 0, state.tokenCount == i {
++                // Keep the boundary the prompt already paid for, even when the
++                // request is being refused: `state.tokenCount == i` with a valid
++                // committed boundary is the same condition the successful path
++                // publishes, and the retry then resumes instead of re-reading.
++                if request?.mayRetainCommittedPrefix != false, i > 0, state.tokenCount == i,
++                   state.committedBoundaryValid {
+                     let committedImages = images.compactMap { image -> ImageSegment? in
+                         guard image.start < i else { return nil }
+                         return ImageSegment(start: image.start, count: min(image.count, i - image.start),
+                             hash: image.hash, preparationIdentity: image.preparationIdentity)
+                     }
+                     cache?.store(state: state, tokens: Array(promptIds.prefix(i)), images: committedImages)
++                    if let failure = request?.failure, failure.code != .clientCancelled {
++                        // Say so: the operator sees minutes of prefill preserved rather
++                        // than a bare refusal, and knows the retry should be quick.
++                        FileHandle.standardError.write(String(
++                            format: "kept %d committed prompt tokens for a retry after %@\n",
++                            i, failure.code.rawValue).data(using: .utf8)!)
++                    }
+                 }
+                 stats.terminalQueryRowsSkipped = model.terminalQueryRowsSkipped - terminalQueryStart
+             stats.terminalMoERowsSkipped = model.terminalMoERowsSkipped - terminalMoEStart
+diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swift
+--- a/Sources/Slotstream/Governor.swift	2026-09-11 21:53:59
++++ b/Sources/Slotstream/Governor.swift	2026-09-12 00:32:17
+@@ -109,6 +109,20 @@
+     /// with a pressure interruption both times.
+     public static let pressureMemory: TimeInterval = 1200
+ 
++    /// Whether a shrink should also drop the retained conversations.
++    ///
++    /// Retention used to go first on every shrink, because ~0.9 GB bought back
++    /// one re-prefill of a short turn. At a long window that trade inverts: a
++    /// 48K prefix costs 16 minutes to rebuild (measured 2026-09-11), while the
++    /// expert pool it would protect refills from SSD as requests run. So drop
++    /// it only when little is held, or when the pool is already at the floor
++    /// and there is nothing else left to give.
++    public static let protectedHeldTokens = 8192
++
++    public static func shouldDropRetainedPrefix(heldTokens: Int, targetSlots: Int) -> Bool {
++        heldTokens <= protectedHeldTokens || targetSlots <= Geometry.floorSlots
++    }
++
+     /// The ceiling to remember after an event with `live` slots in the pool:
+     /// the lower of that and a still-remembered earlier ceiling, so repeated
+     /// events ratchet it down rather than resetting it upwards.
+@@ -422,7 +436,10 @@
+             // ~0.9 GB, recovered by one re-prefill on the next turn — so it
+             // goes before the pool is starved further. Growing keeps it: the
+             // machine has room and the next turn should still be fast.
+-            if !growing { engine.prefixCache.drop() }
++            if !growing, GovernorPolicy.shouldDropRetainedPrefix(
++                heldTokens: engine.prefixCache.heldTokens, targetSlots: target) {
++                engine.prefixCache.drop()
++            }
+             engine.model.pool.resize(to: target)
+             after = engine.model.pool.slots
+             engine.publishPoolSnapshot()
+diff -ruN a/Sources/Slotstream/Model.swift b/Sources/Slotstream/Model.swift
+--- a/Sources/Slotstream/Model.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/Model.swift	2026-09-12 00:32:17
+@@ -127,7 +127,7 @@
+         public var tokenCount = 0
+         // A failed low-level forward can change early layers while tokenCount
+         // still names the preceding boundary. Count alone cannot certify reuse.
+-        var committedBoundaryValid = true
++        package internal(set) var committedBoundaryValid = true
+         /// Speculative-decode companions, created lazily by the MTP-aware
+         /// generate path: the draft head's own attention state, and the
+         /// pre-mixer multi stream at the last consumed position (the next
+diff -ruN a/Sources/Slotstream/RequestControl.swift b/Sources/Slotstream/RequestControl.swift
+--- a/Sources/Slotstream/RequestControl.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/RequestControl.swift	2026-09-12 00:32:17
+@@ -27,6 +27,24 @@
+ public struct RequestFailure: Error, CustomStringConvertible, Codable, Sendable, Equatable {
+     package static let safeRetryAdvice = "try your request again after memory becomes available"
+ 
++    /// Whether a prefix committed before this failure may be kept for the retry.
++    ///
++    /// A refusal raised between prefill passes leaves the state exactly on a
++    /// whole-stack boundary, so the tokens already read are still valid; the
++    /// client is told to try again, and re-reading them costs the same minutes
++    /// again (19 minutes of a 56K prefill, measured 2026-09-11). An execution
++    /// error may have mutated early layers, so it keeps nothing. The caller
++    /// must still verify the boundary against the state it holds.
++    public var retainsCommittedPrefix: Bool {
++        switch code {
++        case .insufficientMemory, .prefillWaitExceeded, .prefillDeadlineExceeded, .clientCancelled,
++             .contextLengthExceeded:
++            return true
++        case .inferenceError, .invalidConfiguration:
++            return false
++        }
++    }
++
+     public enum Code: String, Codable, Sendable {
+         case contextLengthExceeded = "context_length_exceeded"
+         case invalidConfiguration = "invalid_configuration"
+@@ -173,6 +191,8 @@
+     }
+     public var failure: RequestFailure? { lock.withLock { failureValue } }
+     public var mayRetainState: Bool { failure == nil }
++    /// A committed prefix survives no failure, or one raised at a pass boundary.
++    public var mayRetainCommittedPrefix: Bool { failure?.retainsCommittedPrefix ?? true }
+     @discardableResult public func fail(_ error: RequestFailure) -> RequestFailure {
+         lock.withLock {
+             if failureValue == nil { failureValue = error }
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-11 21:53:59
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-12 00:32:17
+@@ -191,6 +191,17 @@
+             P.pressureCeiling(previous: 800, secondsSincePrevious: 60, live: 900), 800)
+         c.equal("ceiling: a stale ceiling is replaced",
+             P.pressureCeiling(previous: 800, secondsSincePrevious: P.pressureMemory + 1, live: 900), 900)
++        // A shrink gives back the expert pool before a long retained prefix:
++        // the pool refills from SSD, the prefix costs minutes of prefill.
++        c.expect("small retained prefix is still dropped on a shrink",
++            P.shouldDropRetainedPrefix(heldTokens: 1024, targetSlots: steady))
++        c.expect("long retained prefix survives a shrink that still has pool to give",
++            !P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: steady))
++        c.expect("at the floor there is nothing else to give, so it goes",
++            P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: Geometry.floorSlots))
++        c.expect("the protected size is the boundary",
++            P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens, targetSlots: steady)
++                && !P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens + 1, targetSlots: steady))
+         return c.report()
+     }
+ }
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-11 18:52:39
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-12 00:32:17
+@@ -172,6 +172,22 @@
+             _ = try Planner.applyingRuntimePolicy(floor, policy: RuntimeAllocationPolicy(prefixCacheTokens: ContextPolicy.maxTokens))
+             c.expect("full retention at the floor is refused, not borrowed", false)
+         } catch { c.expect("full retention at the floor is refused, not borrowed", true, "\(error)") }
++        // Which failures may keep the prefix their prefill already committed.
++        for code in [RequestFailure.Code.insufficientMemory, .prefillWaitExceeded, .prefillDeadlineExceeded,
++                     .clientCancelled, .contextLengthExceeded] {
++            c.expect("\(code.rawValue) keeps its committed boundary", RequestFailure(code, "x").retainsCommittedPrefix)
++        }
++        for code in [RequestFailure.Code.inferenceError, .invalidConfiguration] {
++            c.expect("\(code.rawValue) keeps nothing", !RequestFailure(code, "x").retainsCommittedPrefix)
++        }
++        let controller = RequestController(configuration: try ContextConfiguration(maxContextTokens: 32_768), slackBytes: 0)
++        c.expect("no failure retains everything", controller.mayRetainState && controller.mayRetainCommittedPrefix)
++        controller.fail(RequestFailure(.insufficientMemory, "x"))
++        c.expect("a pressure refusal keeps the committed prefix but not the request state",
++            controller.mayRetainCommittedPrefix && !controller.mayRetainState)
++        let broken = RequestController(configuration: try ContextConfiguration(maxContextTokens: 32_768), slackBytes: 0)
++        broken.fail(RequestFailure(.inferenceError, "x"))
++        c.expect("an execution error keeps nothing", !broken.mayRetainCommittedPrefix)
+         return c.report()
+     }
+ }
