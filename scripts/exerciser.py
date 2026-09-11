@@ -26,6 +26,8 @@ Usage: exerciser.py            run forever
        exerciser.py --sweep 4000,8000,16000,24000,32000 [--label name]
                                context sweep: codebase summary at each prompt size, in order,
                                then exit. Rows carry task "sweep-<tokens>" for the report/dashboard.
+                               Pauses the background suite for the duration (exerciser.pause) and
+                               waits for its current task first, so nothing queues in front of it.
        exerciser.py --list
 """
 import argparse, json, os, random, signal, socket, subprocess, sys, threading, time, urllib.request, urllib.error
@@ -502,9 +504,14 @@ def write_state():
     os.replace(tmp, STATE)
 
 
+OWN_PAUSE = None  # reason this process wrote to the pause file (a sweep pausing the background suite)
+
+
 def pause_reason():
     if os.path.exists(PAUSE):
-        return (read(PAUSE).strip() or "paused")
+        reason = read(PAUSE).strip() or "paused"
+        if reason != OWN_PAUSE:
+            return reason
     if os.path.exists(ACTIVE):
         try:
             age = time.time() - os.path.getmtime(ACTIVE)
@@ -619,15 +626,43 @@ def main():
         return
 
     if args.sweep:
+        global OWN_PAUSE
         sizes = [int(x) for x in args.sweep.split(",") if x.strip()]
-        for size in sizes:
-            name = f"sweep-{size}"
-            TASKS[name] = (lambda size=size: t_codebase_summary(size), 0, True)
-            if not wait_while_paused():
+        # The sweep must have the server to itself: a background task queued in front of a
+        # sweep request eats its prefill-wait budget (sweep-8000 failed that way on 2026-09-11).
+        # Pause the launchd suite for the duration, then wait for its current task to finish.
+        if not os.path.exists(PAUSE):
+            OWN_PAUSE = "context sweep running"
+            with open(PAUSE, "w") as f:
+                f.write(OWN_PAUSE)
+        try:
+            deadline = time.monotonic() + 1800
+            while not stop and time.monotonic() < deadline:
+                try:
+                    other = json.loads(read(STATE) or "{}")
+                except Exception:
+                    other = {}
+                pid = other.get("pid")
+                if pid and pid != os.getpid() and other.get("current"):
+                    try:
+                        os.kill(pid, 0)  # still alive and mid-task: let it finish
+                        print(f"sweep: waiting for background task {other['current']} (pid {pid})", flush=True)
+                        time.sleep(15)
+                        continue
+                    except OSError:
+                        pass
                 break
-            state["label"] = args.label
-            run_task(name)
-            time.sleep(min(args.gap, 30))
+            for size in sizes:
+                name = f"sweep-{size}"
+                TASKS[name] = (lambda size=size: t_codebase_summary(size), 0, True)
+                if not wait_while_paused():
+                    break
+                state["label"] = args.label
+                run_task(name)
+                time.sleep(min(args.gap, 30))
+        finally:
+            if OWN_PAUSE and os.path.exists(PAUSE) and read(PAUSE).strip() == OWN_PAUSE:
+                os.remove(PAUSE)
         return
 
     print(f"exerciser: {BASE} model {MODEL}; corpus {REPOS}; gap {args.gap}s; state {STATE}", flush=True)
