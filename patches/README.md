@@ -4,9 +4,9 @@ Four patches against [Slotstream](https://github.com/carloslfu/slotstream)
 0.2.14 source. Apply in this order (alphabetical, which is what
 `scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
 candidate for an upstream pull request. All four apply cleanly to a stock
-0.2.14 tree in that order (verified 2026-09-11). The first three pass
-Slotstream's T0 check suite (`make checks`, 34 checks, 25,425 assertions)
-with the new checks included; see Status for the fourth.
+0.2.14 tree in that order (verified 2026-09-11) and pass Slotstream's T0
+check suite (`make checks`, 34 checks, 25,436 assertions) with the new
+checks included.
 
 | Patch | What it changes | New check |
 | --- | --- | --- |
@@ -189,6 +189,13 @@ while after pressure is cheap and removes the oscillation.
 > ratchet.
 
 ## Status
+
+2026-09-11 22:42: all four patches installed as release
+`slotstream-0.2.14-local-20260911224202`. `ctl.env` also sets
+`SLOTSTREAM_MAX_RAM_PERCENT=45` (see `LOCAL_LLM_ROADMAP.md` for the sweep
+that motivated it). With that cap the governor has little room to
+oscillate, so the pressure ceiling is a second line of defence; it matters
+most if the cap is raised or removed.
 
 2026-09-11 19:22: all three patches built, checked and installed as release
 `slotstream-0.2.14-local-20260911192148`; `SLOTSTREAM_PREFIX_CACHE_TOKENS=full`

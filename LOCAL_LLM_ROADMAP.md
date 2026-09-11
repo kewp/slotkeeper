@@ -27,12 +27,29 @@ reasoning; this is the state.
   the new `multi-turn-long` task. The debug build at 19:12 interrupted a
   17.7K-token prefill on the live server with a pressure failure; the
   everyday sweep Karl started earlier may be missing that point.
-- Next, in order: (1) read `multi-turn-long` rows as they arrive
-  (`scripts/report.py`): turn-2 TTFT must be at most half of turn-1, and
-  `slotkeeper status` should show hits climbing; (2) read the sweep, rerun
-  any missing sizes, then run it on deep; (3) app Stage A
-  (`APP_IMPLEMENTATION.md`); (4) upstream the three patches
-  (`patches/README.md` has the PR text).
+- 22:42: two everyday sweeps compared (cold cache after restart both times).
+  Uncapped (RAM share 70%), the governor oscillated 25 to 62 experts/layer
+  and 8K and 24K failed with pressure interruptions right after it regrew.
+  With `SLOTSTREAM_MAX_RAM_PERCENT=45` the cache held 25/layer, no pressure
+  events, and every size up to 24K passed; prefill was slower.
+
+  | Prompt | Uncapped TTFT | Uncapped prefill | Cap 45 TTFT | Cap 45 prefill |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 4K | 77 s | 56 tok/s | 116 s | 38 tok/s |
+  | 8K | failed (pressure) | | 231 s | 37 tok/s |
+  | 16K | 183 s | 89 tok/s | 407 s | 38 tok/s |
+  | 24K | failed (pressure) | | 585 s | 44 tok/s |
+  | 28K | | | failed (10 min prefill wait) | |
+
+  Decode was 2.9 to 3.3 tok/s in both. The 28K point hit the configured
+  10-minute prefill budget, not memory. Fourth patch (governor pressure
+  ceiling) installed the same evening.
+- Next, in order: (1) try `SLOTSTREAM_MAX_RAM_PERCENT=55` with the pressure
+  ceiling patch and rerun the sweep, looking for faster prefill without
+  pressure failures; (2) read `multi-turn-long` rows (`scripts/report.py`):
+  turn-2 TTFT at most half of turn-1, prefix hits climbing; (3) run the sweep
+  on deep; (4) app Stage A (`APP_IMPLEMENTATION.md`); (5) upstream the four
+  patches (`patches/README.md` has the PR text).
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
   Mac must stay usable, a cheaper model may continue the work (hence the
   hand-off docs).
