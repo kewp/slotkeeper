@@ -1,6 +1,6 @@
 # Slotstream and OpenCode Recovery Reference
 
-Last verified: 2026-09-11
+Last verified: 2026-09-11 17:00 CEST
 
 ## Purpose
 
@@ -21,12 +21,15 @@ The implementation has two parts:
 - OpenCode: `1.18.30`
 - Slotstream: `0.2.14`
 - Provider id: `slotstream`
-- Base URL: `http://localhost:11434/v1`
+- Base URL: `http://localhost:11435/v1` (moved off 11434 so Ollama cannot collide)
 - Model: `qwen3.8-flash-next:4bit`
-- Context limit: 65,536 tokens
+- Context limit: 32,768 tokens (everyday profile; `deep` = 65,536 on request)
 - Output limit: 4,096 tokens
-- Server command: `~/.slotstream/bin/slotstream serve --max-context 65536`
-- Server log: `~/.slotstream/slotstream.log`
+- Supervisor: LaunchAgent `work.penz.slotstream` running `scripts/slotstream-ctl.sh run`
+- Effective server command: `slotstream serve --model qwen3.8-flash-next:4bit --port 11435 --max-context 32768 --max-prefill-wait 10 --vision off`
+- Persistent settings: `~/.slotstream/ctl.env` (`SLOTSTREAM_PORT=11435`), `~/.slotstream/profile` (`everyday`)
+- Server log: `~/.slotstream/slotstream.log` (rotated at 10 MB by the control script)
+- Metrics: `~/.slotstream/metrics/*.jsonl` (monitor), `~/.slotstream/metrics/bench.jsonl`
 - OpenCode log: `~/.local/share/opencode/log/opencode.log`
 
 The OpenCode provider configuration is in
@@ -85,31 +88,33 @@ survives after a toast is replaced.
 
 ## Installed Build Snapshot
 
-The verified process after the final restart was PID `66629`; treat the PID as a
-point-in-time value. The health endpoint returned `{"version":"0.2.14"}`.
-
-Installed and release artifact SHA-256 values matched:
+Installed 2026-09-11 16:50 CEST from stock 0.2.14 source plus the full repo
+patch (`patches/slotstream-0.2.14-opencode-retry.patch`), built with
+`make checks && make build` (Xcode 26.4.1, Swift 6.3.1). T0: `33 passed, 0
+failed, 0 skipped (25402 assertions)`. The health endpoint returned
+`{"version":"0.2.14"}` and the plan at startup was 19 experts/layer, 2.5 GB
+pool, 8.8 GB expected peak on a 32K window.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `slotstream` | `78c14d82269f521adab1a8fff1b4da2acaaacfc49713ac5f8eb91ee359e8cce9` |
+| `slotstream` | `b10991506821052b57bdc019418cca0e3293db8e7118c015c6a9929063ff169d` |
 | `mlx.metallib` | `198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597` |
-| `build-identity.json` | `385ad3992a4bc2d78ad09847e7828fd39aa5a0c23c6bab3272eb0af5547a1ca8` |
-| `build-source.tar.gz` | `12b8c0dce15aa08d07da632e7abff459254fdf252e8ca4f88227fd94e2a0e460` |
-
-The installation directory is a release symlink:
+| `build-identity.json` | `c6c90f071e8210e6960c76ddf728809febc06fffbf5f455c3da580227566db23` |
+| `build-source.tar.gz` | `a40bbdd9d012db9e106614bbf3dfc63383ae8b15ad44fcc6554391ebd09ea483` |
 
 ```text
-~/.slotstream/bin -> releases/2fd5bfab8073b29095148274b0e5857a43dc20bc530bcacb4c9180ccc5ac2b52-macos26
+~/.slotstream/bin -> releases/slotstream-0.2.14-local-20260911165001
 ```
 
-Stock backups are retained beside the installed files:
+Previous releases stay under `~/.slotstream/releases/` for rollback:
 
-```text
-~/.slotstream/bin/slotstream.0.2.14.original
-~/.slotstream/bin/build-identity.json.0.2.14.original
-~/.slotstream/bin/build-source.tar.gz.0.2.14.original
-```
+- `2fd5bfab8073b29095148274b0e5857a43dc20bc530bcacb4c9180ccc5ac2b52-macos26`:
+  the earlier partial-patch build (`slotstream` sha
+  `78c14d82…8cce9`), with the stock 0.2.14 files kept beside it as
+  `*.0.2.14.original`.
+
+Roll back with `scripts/install-release.sh --rollback <release-dir>` followed by
+`scripts/slotstream-ctl.sh restart`.
 
 ## Validation Evidence
 
@@ -119,12 +124,8 @@ The source used for the currently installed build passed:
 33 passed, 0 failed, 0 skipped (25401 assertions)
 ```
 
-The maintained patch was subsequently expanded to cover the queued-pressure and
-governor-unavailable pre-output paths. That source passes 25,402 T0 assertions
-and the patch applies forward to clean 0.2.14 source. It has not yet replaced the
-running binary because an active inference run was left undisturbed. Build and
-install it during the next controlled restart, then update the artifact hashes
-in this snapshot.
+The expanded patch (queued-pressure and governor-unavailable pre-output paths)
+is now the installed build; see the snapshot above.
 
 Commands used:
 
@@ -139,6 +140,10 @@ curl --fail http://localhost:11434/api/version
 
 Additional plugin smoke tests covered the tool-first prefill timer, ETA and
 `/api/show` data, failure diagnostics, and retry-status rendering.
+
+The simulated-pressure drill (`scripts/pressure-drill.sh`, needs sudo for
+`memory_pressure -S`) has not yet been run against the installed build. It is
+the remaining gap in verifying the retry contract end to end.
 
 The OpenCode retry unit test could not run from the cached OpenCode checkout
 because its monorepo dependencies were incomplete:
@@ -198,6 +203,16 @@ scripts/slotstream-ctl.sh start deep
 
 Then verify the process, health response, and artifact hashes. Restart OpenCode
 after plugin changes so the current process loads the new plugin code.
+
+With the LaunchAgent installed the same sequence is:
+
+```sh
+scripts/slotstream-ctl.sh stop
+scripts/install-release.sh <source tree>      # new release dir + symlink switch
+scripts/slotstream-ctl.sh start               # via launchd; waits for ready
+scripts/slotstream-ctl.sh status
+scripts/bench.py --label <what changed>
+```
 
 ## Known Limits
 

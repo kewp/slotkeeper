@@ -24,9 +24,15 @@
 #   SLOTSTREAM_MODEL (qwen3.8-flash-next:4bit)   SLOTSTREAM_MAX_PREFILL_WAIT (10 minutes)
 #   SLOTSTREAM_MAX_RAM_PERCENT (unset = Slotstream default 70)   SLOTSTREAM_VISION (off)
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
+#   Persist any of these in ~/.slotstream/ctl.env (KEY=value lines); it is read by this script,
+#   monitor.sh, bench.py and SlotstreamBar, so one file defines the port everywhere.
 set -euo pipefail
 
 SLOTSTREAM_HOME="${SLOTSTREAM_HOME:-$HOME/.slotstream}"
+# Persistent knobs (port, RAM percent, vision...). Environment set by the caller still wins.
+if [[ -f "$SLOTSTREAM_HOME/ctl.env" ]]; then
+  while IFS='=' read -r k v; do [[ "$k" =~ ^[A-Z_]+$ && -z "${!k:-}" ]] && export "$k=$v"; done < "$SLOTSTREAM_HOME/ctl.env"
+fi
 SLOTSTREAM_BIN="${SLOTSTREAM_BIN:-$SLOTSTREAM_HOME/bin/slotstream}"
 SLOTSTREAM_PORT="${SLOTSTREAM_PORT:-11434}"
 SLOTSTREAM_MODEL="${SLOTSTREAM_MODEL:-qwen3.8-flash-next:4bit}"
@@ -61,7 +67,8 @@ server_pids() { pgrep -f "slotstream serve" || true; }
 
 port_owner() {
   # Prints "pid command" for whatever listens on the port, or nothing.
-  lsof -nP -iTCP:"$SLOTSTREAM_PORT" -sTCP:LISTEN -Fpc 2>/dev/null | awk '/^p/{pid=substr($0,2)} /^c/{print pid, substr($0,2)}' | head -1
+  # lsof exits 1 when nothing listens; do not let pipefail turn that into a script exit.
+  { lsof -nP -iTCP:"$SLOTSTREAM_PORT" -sTCP:LISTEN -Fpc 2>/dev/null || true; } | awk '/^p/{pid=substr($0,2)} /^c/{print pid, substr($0,2)}' | head -1
 }
 
 healthy() { curl -fsS --max-time 2 "$BASE/api/version" >/dev/null 2>&1; }
@@ -95,13 +102,15 @@ check_disk() {
   return 0
 }
 
+SERVE_ARGS=()
 serve_args() {
+  # Fills SERVE_ARGS (bash 3.2 on macOS has no mapfile).
   local context="$1"
   local args=(serve --model "$SLOTSTREAM_MODEL" --port "$SLOTSTREAM_PORT" --max-context "$context" --max-prefill-wait "$SLOTSTREAM_MAX_PREFILL_WAIT" --vision "$SLOTSTREAM_VISION")
   [[ -n "${SLOTSTREAM_MAX_RAM_PERCENT:-}" ]] && args+=(--max-ram-percent "$SLOTSTREAM_MAX_RAM_PERCENT")
   # shellcheck disable=SC2206
   [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && args+=($SLOTSTREAM_EXTRA_ARGS)
-  printf '%s\n' "${args[@]}"
+  SERVE_ARGS=("${args[@]}")
 }
 
 opencode_context() {
@@ -110,8 +119,17 @@ opencode_context() {
   awk '/"slotstream"[[:space:]]*:/{s=1} s&&/"context"[[:space:]]*:/{gsub(/[^0-9]/,"",$0); print; exit}' "$OPENCODE_CONFIG"
 }
 
+opencode_port() {
+  [[ -f "$OPENCODE_CONFIG" ]] || return 0
+  awk '/"slotstream"[[:space:]]*:/{s=1} s&&/"baseURL"[[:space:]]*:/{match($0,/:[0-9]+\//); print substr($0,RSTART+1,RLENGTH-2); exit}' "$OPENCODE_CONFIG"
+}
+
 warn_profile_mismatch() {
-  local server_ctx="$1" oc_ctx
+  local server_ctx="$1" oc_ctx oc_port
+  oc_port="$(opencode_port)"
+  if [[ -n "$oc_port" && "$oc_port" != "$SLOTSTREAM_PORT" ]]; then
+    log "warning: OpenCode's slotstream baseURL uses port $oc_port but the server uses $SLOTSTREAM_PORT."
+  fi
   oc_ctx="$(opencode_context)"
   [[ -z "$oc_ctx" ]] && return 0
   if [[ "$oc_ctx" != "$server_ctx" ]]; then
@@ -124,9 +142,9 @@ cmd_run() {
   [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
   check_port; check_disk
   warn_profile_mismatch "$context"
-  local args; mapfile -t args < <(serve_args "$context")
-  log "exec $SLOTSTREAM_BIN ${args[*]}"
-  exec "$SLOTSTREAM_BIN" "${args[@]}"
+  serve_args "$context"
+  log "exec $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
+  exec "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}"
 }
 
 cmd_start() {
@@ -139,9 +157,9 @@ cmd_start() {
     [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
     check_port; check_disk; rotate_log
     warn_profile_mismatch "$context"
-    local args; mapfile -t args < <(serve_args "$context")
-    log "starting: $SLOTSTREAM_BIN ${args[*]}"
-    nohup "$SLOTSTREAM_BIN" "${args[@]}" >> "$LOG" 2>&1 &
+    serve_args "$context"
+    log "starting: $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
+    nohup "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}" >> "$LOG" 2>&1 &
     echo $! > "$PID_FILE"
   fi
   cmd_wait_ready "${2:-180}"
@@ -170,7 +188,8 @@ cmd_wait_ready() {
   local timeout="${1:-180}" i
   for i in $(seq 1 "$timeout"); do
     healthy && { log "ready on $BASE"; return 0; }
-    [[ -z "$(server_pids)" ]] && die "process exited before becoming ready; see $LOG"
+    # Grace period: through launchd the process is still bash for a moment before exec.
+    (( i > 10 )) && [[ -z "$(server_pids)" ]] && die "process exited before becoming ready; see $LOG"
     sleep 1
   done
   die "not ready after ${timeout}s"
@@ -197,7 +216,7 @@ cmd_status() {
   else
     echo "health:   not ready"
   fi
-  echo "profile:  $(cat "$PROFILE_FILE" 2>/dev/null || echo "everyday (default)")"
+  echo "profile:  $(cat "$PROFILE_FILE" 2>/dev/null || echo "everyday (default)")  port: $SLOTSTREAM_PORT  env: $([[ -f "$SLOTSTREAM_HOME/ctl.env" ]] && tr '\n' ' ' < "$SLOTSTREAM_HOME/ctl.env" || echo none)"
   echo "agent:    $(launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1 && echo installed || echo "not installed")"
   echo "pressure: $(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null | sed 's/^1$/normal/;s/^2$/warning/;s/^4$/critical/')  swap: $(sysctl -n vm.swapusage | sed -E 's/.*used = ([^ ]+).*/\1/')  disk free: $(df -h "$SLOTSTREAM_HOME" | awk 'NR==2{print $4}')"
 }

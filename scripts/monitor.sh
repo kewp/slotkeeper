@@ -11,6 +11,7 @@ set -uo pipefail
 
 INTERVAL="${1:-30}"
 SLOTSTREAM_HOME="${SLOTSTREAM_HOME:-$HOME/.slotstream}"
+if [[ -f "$SLOTSTREAM_HOME/ctl.env" ]]; then while IFS='=' read -r k v; do [[ "$k" =~ ^[A-Z_]+$ ]] && [[ -z "${!k:-}" ]] && export "$k=$v"; done < "$SLOTSTREAM_HOME/ctl.env"; fi
 SLOTSTREAM_PORT="${SLOTSTREAM_PORT:-11434}"
 SLOTSTREAM_MODEL="${SLOTSTREAM_MODEL:-qwen3.8-flash-next:4bit}"
 BASE="http://127.0.0.1:$SLOTSTREAM_PORT"

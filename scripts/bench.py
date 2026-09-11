@@ -20,6 +20,12 @@ import argparse, json, os, sys, time, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
+_env_file = os.path.join(HOME, "ctl.env")
+if os.path.exists(_env_file):
+    for _line in open(_env_file):
+        if "=" in _line and not _line.startswith("#"):
+            _k, _v = _line.rstrip("\n").split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 PORT = os.environ.get("SLOTSTREAM_PORT", "11434")
 MODEL = os.environ.get("SLOTSTREAM_MODEL", "qwen3.8-flash-next:4bit")
 BASE = f"http://127.0.0.1:{PORT}"

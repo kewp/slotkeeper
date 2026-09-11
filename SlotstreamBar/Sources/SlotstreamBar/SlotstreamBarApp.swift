@@ -75,14 +75,27 @@ final class StatusModel: ObservableObject {
     @Published var profileName = "everyday"
 
     let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream")
-    let endpoint = ProcessInfo.processInfo.environment["SLOTSTREAM_BASE_URL"] ?? "http://localhost:11434/v1"
-    let model = ProcessInfo.processInfo.environment["SLOTSTREAM_MODEL"] ?? "qwen3.8-flash-next:4bit"
+    /// Settings shared with the scripts: ~/.slotstream/ctl.env (KEY=value), overridable by environment.
+    static let settings: [String: String] = {
+        var values: [String: String] = [:]
+        let file = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/ctl.env")
+        if let text = try? String(contentsOf: file, encoding: .utf8) {
+            for line in text.split(separator: "\n") where line.contains("=") && !line.hasPrefix("#") {
+                let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                values[parts[0]] = parts[1]
+            }
+        }
+        for (key, value) in ProcessInfo.processInfo.environment where key.hasPrefix("SLOTSTREAM_") { values[key] = value }
+        return values
+    }()
+    let endpoint = "http://localhost:\(StatusModel.settings["SLOTSTREAM_PORT"] ?? "11434")/v1"
+    let model = StatusModel.settings["SLOTSTREAM_MODEL"] ?? "qwen3.8-flash-next:4bit"
     var logURL: URL { home.appendingPathComponent("slotstream.log") }
     var metricsURL: URL { home.appendingPathComponent("metrics") }
 
     /// The control script. Override with SLOTSTREAM_CTL when the repo lives elsewhere.
     lazy var ctlPath: String = {
-        if let env = ProcessInfo.processInfo.environment["SLOTSTREAM_CTL"] { return env }
+        if let env = StatusModel.settings["SLOTSTREAM_CTL"] { return env }
         // Package dir -> repo root/scripts when run with `swift run`.
         let candidates = [
             URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

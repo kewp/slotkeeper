@@ -30,7 +30,10 @@ Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`,
 - Never restart or stop the Slotstream server while a request is in flight, and do not restart it just to test something; the user relies on it from OpenCode. Read-only endpoints (`/api/version`, `/api/ps`, `/api/show`) are fine. `slotstream doctor` must not run while the model is loaded.
 - `scripts/pressure-drill.sh` and `scripts/bench.py --set long` load the machine; run them only when asked.
 - Server window and OpenCode's `limit.context` for provider `slotstream` must match. `slotstream-ctl.sh status` warns on mismatch. The OpenCode config is JSONC (trailing commas), so do not parse it with `jq`.
-- Profiles: everyday 32768, conservative 16384, deep 65536, persisted in `~/.slotstream/profile`. Ollama is installed and shares port 11434; the control script refuses to start over a foreign listener.
+- Profiles: everyday 32768, conservative 16384, deep 65536, persisted in `~/.slotstream/profile`. Port and other knobs live in `~/.slotstream/ctl.env` (currently port 11435; Ollama keeps 11434). All scripts and the app read that file.
+- The server runs under launchd (`work.penz.slotstream`). Use the control script to stop/start; do not `pkill` it, launchd will respawn it after 30 s and `pkill -f "slotstream serve"` also kills any foreground test run.
+- Scripts must stay compatible with `/bin/bash` 3.2 (launchd runs them with it): no `mapfile`, no associative arrays. `lsof` exits 1 on no match, so guard pipelines under `pipefail`.
+- Rebuilding Slotstream: extract `~/.slotstream/bin/build-source.tar.gz.0.2.14.original` (kept in the first release dir), apply the repo patch, copy `~/.slotstream/bin/mlx.metallib` to `Tools/lib/mlx-0.31.1.metallib`, then `make checks && make build` (about 5 minutes). Install with `scripts/install-release.sh`.
 
 ## Deployment
 

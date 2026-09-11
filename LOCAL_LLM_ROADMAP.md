@@ -14,23 +14,31 @@ that repeatedly enters memory pressure or disrupts other applications.
 
 ## Current State
 
-- Slotstream 0.2.14 serves `qwen3.8-flash-next:4bit` on
-  `http://localhost:11434`.
-- The server currently starts with `--max-context 65536` and uses Slotstream's
-  elastic auto memory plan.
-- OpenCode uses a 65,536-token context declaration and a 4,096-token output
-  limit.
-- The OpenCode plugin reports prefill, completion, cache, memory, and failure
-  diagnostics.
-- The maintained patch classifies known pre-output memory-pressure paths for
-  OpenCode's existing retry loop. Post-output pressure is deliberately not
-  replayed. Rebuild and install after any patch change before assuming the
-  running binary has the latest coverage.
-- Slotstream writes inference failures to `~/.slotstream/slotstream.log`.
-- The running server has demonstrated elastic expert-cache growth and shrink as
-  other applications changed available memory.
+Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 
-See `SLOTSTREAM_RECOVERY.md` for exact installed artifacts and validation.
+- Slotstream 0.2.14 with the full repo patch serves `qwen3.8-flash-next:4bit`
+  on `http://localhost:11435`, supervised by the `work.penz.slotstream`
+  LaunchAgent (start at login, restart after crash, 30 s throttle).
+- Window is 32,768 tokens (`everyday`), prefill wait 10 minutes, vision off.
+  OpenCode declares the same 32,768 context and 4,096 output.
+- Startup plan on the 32K window: 19 experts/layer, 2.5 GB pool, 8.8 GB
+  expected peak, versus 13/layer and 1.8 GB after shrink on the 65K window
+  with the same applications open.
+- First 32K measurements (cold cache, right after restart):
+
+  | Prompt | Prompt tok | TTFT | Prefill | Decode |
+  | --- | ---: | ---: | ---: | ---: |
+  | short | 24 | 4.5 s | n/a | 2.6 tok/s |
+  | medium | 1,673 | 71 s | 23 tok/s | 2.7 tok/s |
+
+  Prefill ran far below the ~85 tok/s plan; the cache was cold and refilling
+  from SSD. Repeat after a few hours of use before drawing conclusions.
+- The monitor samples every 30 s into `~/.slotstream/metrics/`.
+- Ollama remains installed on 11434 and no longer conflicts.
+- Disk free rose from 14 GiB to 82 GiB after cleanup, which makes the
+  `pack-experts` contiguous artifact a possible experiment again.
+- Not yet done: the pressure drill against the installed build, the `caffeinate`
+  request-scoped sleep assertion, `small_model` for OpenCode title generation.
 
 ## Plugin Deployment
 
@@ -68,7 +76,7 @@ imports are type-only, so the mismatch is not affecting runtime behavior today.
 
 ### Use 32K for the continuous profile
 
-The current 65,536-token window is supported, but it costs approximately 1.8 GB
+Adopted 2026-09-11 17:00. The 65,536-token window is supported, but it costs approximately 1.8 GB
 more planned memory than 32,768 tokens. Slotstream's fixed footprint already
 includes a 32K context. Above 32K it charges both additional active sequence
 state and a conservative transient growth reserve.
@@ -261,9 +269,7 @@ did surface facts the plans do not yet account for:
   request after each turn, competing for the single-flight gate and triggering a
   prefill. Point OpenCode's `small_model` at a cheaper provider (or a cloud
   model) so the local server only serves real work.
-- The expanded patch (25,402 T0 assertions) is built but not installed; the
-  running binary is the earlier patched build from 15:20. Install it at the next
-  controlled restart as `SLOTSTREAM_RECOVERY.md` says.
+- The expanded patch (25,402 T0 assertions) is now installed (16:50).
 
 ## Tooling Added (2026-09-11)
 
@@ -274,8 +280,9 @@ Slotstream rebuild and none were applied to the running server.
 | Tool | Purpose | Status |
 | --- | --- | --- |
 | `scripts/slotstream-ctl.sh` | start/stop/restart/status/health, named profiles, port-conflict and disk checks, log rotation, doctor guard, support bundle, LaunchAgent install | verified `status` against the live server |
-| `launchd/work.penz.slotstream.plist` | user LaunchAgent: restart on crash only, 30 s throttle, log capture | lint-clean, not installed |
-| `scripts/monitor.sh` | 30 s JSONL samples of pressure, swap, disk, battery, process, plan and prefix-cache state, with notifications | running in the background since 16:34 |
+| `launchd/work.penz.slotstream.plist` | user LaunchAgent: restart on crash only, 30 s throttle, log capture | installed and running |
+| `scripts/install-release.sh` | new release directory, hashes, atomic symlink switch, `--rollback` | used for the 16:50 install |
+| `scripts/monitor.sh` | 30 s JSONL samples of pressure, swap, disk, battery, process, plan and prefix-cache state, with notifications | running in the background (restarted 17:00 for the new port) |
 | `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
 | `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | written, not run |
 | `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
