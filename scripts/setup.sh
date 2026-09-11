@@ -9,7 +9,7 @@
 # next OpenCode restart) instead of a standalone copy.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CTL="$REPO/scripts/slotstream-ctl.sh"
+CTL="$REPO/scripts/slotkeeper"
 SLOTSTREAM_HOME="${SLOTSTREAM_HOME:-$HOME/.slotstream}"
 YES=0; PORT=""; PROFILE=""; SERVICES=""; LINK=0
 while [[ $# -gt 0 ]]; do

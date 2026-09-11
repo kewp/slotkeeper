@@ -1,5 +1,5 @@
 node_modules/
 *.log
 .DS_Store
-SlotstreamBar/.build/
+Slotkeeper/.build/
 __pycache__/

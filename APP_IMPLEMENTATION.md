@@ -8,7 +8,7 @@ operating rules, then this file. `APP_PLAN.md` is the vision; this is the work.
 ## 0. Ground rules for any implementer
 
 - Never restart, stop, or `pkill` the Slotstream server on your own. Use
-  `scripts/slotstream-ctl.sh` and only when the user asks. Read-only endpoints
+  `scripts/slotkeeper` and only when the user asks. Read-only endpoints
   are always fine: `GET /api/version`, `GET /api/ps`, `POST /api/show` with
   `{"model":"qwen3.8-flash-next:4bit"}`.
 - The server port and other knobs live in `~/.slotstream/ctl.env`. Every tool
@@ -18,15 +18,15 @@ operating rules, then this file. `APP_PLAN.md` is the vision; this is the work.
   executable (`chmod +x`) or launchd exits with code 78.
 - Reload background pieces with the control script, never `launchctl
   kickstart` (it hangs here):
-  - `scripts/slotstream-ctl.sh exerciser start` after editing `exerciser.py`
-  - `scripts/slotstream-ctl.sh monitor start` after editing `monitor.sh`
-  - `scripts/slotstream-ctl.sh bar restart` after editing anything in
-    `SlotstreamBar/` (builds release, reloads the LaunchAgent)
+  - `scripts/slotkeeper exerciser start` after editing `exerciser.py`
+  - `scripts/slotkeeper monitor start` after editing `monitor.sh`
+  - `scripts/slotkeeper bar restart` after editing anything in
+    `Slotkeeper/` (builds release, reloads the LaunchAgent)
 - Verify before claiming done:
   - `npm run typecheck` for the plugin
   - `python3 -m py_compile scripts/*.py` and `bash -n scripts/*.sh`
-  - `cd SlotstreamBar && swift build` for the app
-  - `scripts/slotstream-ctl.sh status`, `... exerciser status`, `... bar status`
+  - `cd Slotkeeper && swift build` for the app
+  - `scripts/slotkeeper status`, `... exerciser status`, `... bar status`
 - Commit on `main` with a short imperative subject. Do not create branches.
 - Update the docs that describe what you changed (`README.md` command list,
   `LOCAL_LLM_ROADMAP.md` tooling table, this file).
@@ -109,7 +109,7 @@ Task names: `short-chat`, `code-review`, `multi-turn`, `tool-call`,
 ### 1.7 `exerciser.pause`
 
 Presence means paused; contents are the reason. Created by
-`slotstream-ctl.sh exerciser pause [reason]` or the menu bar; removed by
+`slotkeeper exerciser pause [reason]` or the menu bar; removed by
 `resume`.
 
 ### 1.8 `opencode-active` (written by the plugin during a request)
@@ -160,24 +160,24 @@ runtime_prefix_cache_enabled, fully_resident, notes[]`;
 `details.prefix_cache`: `enabled, held_tokens, held_gb, max_tokens, hits,
 misses, evictions, conversations`. `GET /api/ps` → `models[0].size_vram`.
 
-## 2. App code map (`SlotstreamBar/`)
+## 2. App code map (`Slotkeeper/`)
 
 - `Package.swift`: tools 5.10, macOS 14, `-parse-as-library`.
-- `Sources/SlotstreamBar/SlotstreamBarApp.swift`: `@main` app with a
+- `Sources/Slotkeeper/SlotkeeperApp.swift`: `@main` app with a
   `MenuBarExtra` and a `Window("Slotstream Dashboard", id: "dashboard")`.
   `StatusModel` (`@MainActor`, `ObservableObject`) polls every 2 s: version,
   plan (`/api/show`), system pressure (`sysctl`, `memory_pressure`), exerciser
   state file, `opencode-active`, server CPU (`ps`), last prefill line from the
   log. `StatusModel.settings` merges `ctl.env` and `SLOTSTREAM_*` env.
-  `run(_:_:)` shells out to `slotstream-ctl.sh` (path from
+  `run(_:_:)` shells out to `slotkeeper` (path from
   `SLOTSTREAM_CTL` or resolved relative to the source file).
   `Shell.run` and `Http.get/post` are the only side-effect helpers.
-- `Sources/SlotstreamBar/Dashboard.swift`: `DashboardView` loads
+- `Sources/Slotkeeper/Dashboard.swift`: `DashboardView` loads
   `metrics/*.jsonl` and `exerciser.jsonl` on appear and on window change,
   renders Swift Charts (cache/pressure timeline, TTFT by prompt size, decode by
   cache size), a `Table` of recent runs, and a per-task summary.
 - Build/run: `swift build`, `swift run` for a dev instance (kill the launchd
-  one first with `slotstream-ctl.sh bar uninstall`, reinstall after).
+  one first with `slotkeeper bar uninstall`, reinstall after).
 
 Conventions: keep all parsing in `StatusModel`/`load()`; views are dumb. No
 new dependencies without a reason; Swift Charts and Foundation cover Stage A
@@ -189,7 +189,7 @@ and B. Never import MLX or Slotstream into the app.
 
 Goal: one table of every request, from any client.
 
-1. Add `Sources/SlotstreamBar/RequestsStore.swift` with
+1. Add `Sources/Slotkeeper/RequestsStore.swift` with
    `struct RequestRow: Identifiable { id, ts, source ("opencode"/"exerciser"/"bench"), agentOrTask, promptTokens, cachedTokens, outputTokens, ttft, prefillRate, decodeRate, totalS, finish, errorCode, expertsBefore, pressure }`.
 2. Loader: parse `exerciser.jsonl` and `bench.jsonl` (see 1.4, 1.5) and the
    plugin records (1.10). For plugin records, `ts` is the log line's
@@ -235,7 +235,7 @@ Goal: one table of every request, from any client.
    apply enabled/weight, register custom tasks as `t_custom(name, file,
    max_tokens)` that behave like `code-review` with the file's text as prompt.
 2. App: form bound to that JSON; "Run now" button calls
-   `scripts/slotstream-ctl.sh exerciser run-task <name>` (add that subcommand:
+   `scripts/slotkeeper exerciser run-task <name>` (add that subcommand:
    `python3 exerciser.py --task <name>` while the daemon is paused; simplest is
    to write the pause flag, run, remove it).
 3. Verify: disable a task, watch the next cycle skip it (state `by_task`).
@@ -246,7 +246,7 @@ Goal: one table of every request, from any client.
    `exerciser.py --sweep ... --label ...` as a child process, streams stdout
    into a log pane, table of results when done.
 2. Profile A/B: pick two profiles; the app pauses the exerciser, runs
-   `slotstream-ctl.sh restart <p1>`, waits ready, sweeps, repeats for `p2`,
+   `slotkeeper restart <p1>`, waits ready, sweeps, repeats for `p2`,
    restores the original profile, resumes. Chart both labels on TTFT-by-size.
    Requires explicit user confirmation each time (it restarts the server).
 3. Evening run: a "keep awake and run for N hours" toggle that writes

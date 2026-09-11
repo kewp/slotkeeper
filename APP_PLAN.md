@@ -1,11 +1,11 @@
-# Slotstream App Plan
+# Slotkeeper App Plan
 
 Written 2026-09-11. Answers two questions: what a full app would be, and what
 pushing the context window beyond 65K would take and cost.
 
 ## What exists
 
-- `SlotstreamBar/`: menu-bar supervisor with state, plan, pressure, live active
+- `Slotkeeper/`: menu-bar supervisor with state, plan, pressure, live active
   request (prefill progress from the server log, generation rate from the
   OpenCode plugin or exerciser), exerciser status and pause, profile switching,
   logs, support bundle, and a first dashboard window (cache/pressure timeline,

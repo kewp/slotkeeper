@@ -17,7 +17,7 @@ that repeatedly enters memory pressure or disrupts other applications.
 Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 
 - Slotstream 0.2.14 with the full repo patch serves `qwen3.8-flash-next:4bit`
-  on `http://localhost:11435`, supervised by the `local.slotstream`
+  on `http://localhost:11435`, supervised by the `local.slotkeeper`
   LaunchAgent (start at login, restart after crash, 30 s throttle).
 - Window is 32,768 tokens (`everyday`), prefill wait 10 minutes, vision off.
   OpenCode declares the same 32,768 context and 4,096 output.
@@ -68,7 +68,7 @@ The plugin is currently tied to this repository. The discovered OpenCode file is
 It contains an absolute re-export:
 
 ```ts
-export { ModelStats } from "~/opencode-model-stats/model-stats.ts"
+export { ModelStats } from "~/slotkeeper/model-stats.ts"
 ```
 
 Moving or deleting the repository will therefore break the plugin on the next
@@ -162,7 +162,7 @@ Effort: hours to two days.
 ### P1: Supervise the service
 
 Effort: two to five days for a solid personal setup. A first pass exists in
-`scripts/slotstream-ctl.sh` and `launchd/local.slotstream.plist`; the items
+`scripts/slotkeeper` and `launchd/local.slotkeeper.plist`; the items
 below that it does not yet cover are sleep/wake handling and failure
 notifications from the supervisor itself (the monitor notifies on pressure and
 disk).
@@ -291,23 +291,23 @@ did surface facts the plans do not yet account for:
 ## Tooling Added (2026-09-11)
 
 The roadmap asked for a week of evidence but had nothing to collect it. These
-live in `scripts/`, `launchd/`, and `SlotstreamBar/`; none of them require a
+live in `scripts/`, `launchd/`, and `Slotkeeper/`; none of them require a
 Slotstream rebuild and none were applied to the running server.
 
 | Tool | Purpose | Status |
 | --- | --- | --- |
-| `scripts/slotstream-ctl.sh` | start/stop/restart/status/health, named profiles, port-conflict and disk checks, log rotation, doctor guard, support bundle, LaunchAgent install | verified `status` against the live server |
-| `launchd/local.slotstream.plist` | user LaunchAgent: restart on crash only, 30 s throttle, log capture | installed and running |
+| `scripts/slotkeeper` | start/stop/restart/status/health, named profiles, port-conflict and disk checks, log rotation, doctor guard, support bundle, LaunchAgent install | verified `status` against the live server |
+| `launchd/local.slotkeeper.plist` | user LaunchAgent: restart on crash only, 30 s throttle, log capture | installed and running |
 | `scripts/install-release.sh` | new release directory, hashes, atomic symlink switch, `--rollback` | used for the 16:50 install |
 | `scripts/monitor.sh` | 30 s JSONL samples of pressure, swap, disk, battery, process, plan and prefix-cache state, with notifications | running in the background (restarted 17:00 for the new port) |
 | `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
 | `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | run 17:01, contract holds |
 | `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
 | `scripts/setup.sh` | new-machine setup: requirement checks, settings, plugin install, provider snippet, optional services | tested against a scratch home |
-| `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle, exerciser status and pause | builds and runs |
-| `scripts/exerciser.py` | continuous 12-task suite with per-run cost and behaviour checks; yields to OpenCode, battery, pressure, pause flag | LaunchAgent `local.slotstream-exerciser`, started 17:15 |
+| `Slotkeeper/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle, exerciser status and pause | builds and runs |
+| `scripts/exerciser.py` | continuous 12-task suite with per-run cost and behaviour checks; yields to OpenCode, battery, pressure, pause flag | LaunchAgent `local.slotkeeper-exerciser`, started 17:15 |
 | `scripts/report.py` | folds exerciser, bench and monitor data into pass rates, medians, decode-vs-cache, pressure minutes | written |
-| `slotstream-ctl.sh bar install` | menu-bar app built in release and registered as LaunchAgent `local.slotstreambar` (loads at login) | installed 17:32 |
+| `slotkeeper bar install` | menu-bar app built in release and registered as LaunchAgent `local.slotkeeper-bar` (loads at login) | installed 17:32 |
 | plugin `opencode-active` marker | `model-stats.ts` writes `~/.slotstream/opencode-active` during requests so the exerciser never competes | typechecks; loads on next OpenCode restart |
 
 The plugin still loads through the repo shim on purpose while the plugin

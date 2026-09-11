@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "SlotstreamBar",
+    name: "Slotkeeper",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "SlotstreamBar",
-            path: "Sources/SlotstreamBar",
+            name: "Slotkeeper",
+            path: "Sources/Slotkeeper",
             swiftSettings: [.unsafeFlags(["-parse-as-library"])]
         ),
     ]

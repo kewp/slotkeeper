@@ -30,7 +30,7 @@ src="${1:?source tree}"
 name="${2:-slotstream-0.2.14-local-$(date +%Y%m%d%H%M%S)}"
 out="$src/.build/release"
 for f in slotstream mlx.metallib build-identity.json; do [[ -f "$out/$f" ]] || { echo "missing $out/$f" >&2; exit 1; }; done
-if pgrep -f "slotstream serve" >/dev/null; then echo "server is running; stop it first (scripts/slotstream-ctl.sh stop)" >&2; exit 1; fi
+if pgrep -f "slotstream serve" >/dev/null; then echo "server is running; stop it first (scripts/slotkeeper stop)" >&2; exit 1; fi
 
 release="$RELEASES/$name"
 mkdir -p "$release"

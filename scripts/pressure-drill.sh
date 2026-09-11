@@ -26,7 +26,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$(mktemp -t pressure-drill)"
 
 [[ "$LEVEL" == warn || "$LEVEL" == critical ]] || { echo "level must be warn or critical" >&2; exit 2; }
-"$DIR/slotstream-ctl.sh" health || { echo "server not ready" >&2; exit 1; }
+"$DIR/slotkeeper" health || { echo "server not ready" >&2; exit 1; }
 
 log_start=$(wc -l < "$LOG")
 echo "drill: starting medium request; simulating $LEVEL pressure after ${DELAY}s"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lifecycle control for the local Slotstream server.
 #
-# Usage: slotstream-ctl.sh <command> [args]
+# Usage: slotkeeper <command> [args]
 #
 #   start [profile]     Start the server in the background (default profile: everyday).
 #   run [profile]       Run in the foreground. Used by the LaunchAgent.
@@ -18,10 +18,10 @@
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
-#   bar <install|uninstall|restart|status> Menu-bar app at login (local.slotstreambar); builds it first.
-#   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (local.slotstream-monitor).
+#   bar <install|uninstall|restart|status> Menu-bar app at login (local.slotkeeper-bar); builds it first.
+#   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (local.slotkeeper-monitor).
 #   exerciser <start|stop|pause [reason]|resume|status|report>
-#                       Background task suite as a LaunchAgent (local.slotstream-exerciser).
+#                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
 # deep disables the prefill-wait budget (a full 65K prompt needs ~13 min before its first token);
@@ -35,7 +35,7 @@
 #   SLOTSTREAM_MAX_RAM_PERCENT (unset = Slotstream default 70)   SLOTSTREAM_VISION (off)
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
 #   Persist any of these in ~/.slotstream/ctl.env (KEY=value lines); it is read by this script,
-#   monitor.sh, bench.py and SlotstreamBar, so one file defines the port everywhere.
+#   monitor.sh, bench.py and Slotkeeper, so one file defines the port everywhere.
 set -euo pipefail
 
 SLOTSTREAM_HOME="${SLOTSTREAM_HOME:-$HOME/.slotstream}"
@@ -53,12 +53,12 @@ OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 LOG="$SLOTSTREAM_HOME/slotstream.log"
 PROFILE_FILE="$SLOTSTREAM_HOME/profile"
 PID_FILE="$SLOTSTREAM_HOME/slotstream.pid"
-AGENT_LABEL="local.slotstream"
+AGENT_LABEL="local.slotkeeper"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 BASE="http://127.0.0.1:$SLOTSTREAM_PORT"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-log() { printf '[slotstream-ctl %s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
+log() { printf '[slotkeeper %s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
 resolve_profile() {
@@ -301,7 +301,7 @@ cmd_bundle() {
   ls -la "$SLOTSTREAM_HOME/bin/" > "$dir/install.txt" 2>&1 || true
   shasum -a 256 "$SLOTSTREAM_HOME"/bin/slotstream "$SLOTSTREAM_HOME"/bin/mlx.metallib >> "$dir/install.txt" 2>/dev/null || true
   [[ -d "$SLOTSTREAM_HOME/metrics" ]] && tail -n 200 "$SLOTSTREAM_HOME"/metrics/*.jsonl > "$dir/metrics.tail.jsonl" 2>/dev/null || true
-  grep -h '"service":"model-stats"' "$HOME/.local/share/opencode/log/"*.log 2>/dev/null | tail -n 100 > "$dir/opencode-model-stats.log" || true
+  grep -h '"service":"model-stats"' "$HOME/.local/share/opencode/log/"*.log 2>/dev/null | tail -n 100 > "$dir/slotkeeper.log" || true
   tar -czf "$dir.tar.gz" -C "$(dirname "$dir")" "$(basename "$dir")" && rm -rf "$dir"
   echo "$dir.tar.gz"
 }
@@ -310,7 +310,7 @@ cmd_install_agent() {
   local template="$SCRIPT_DIR/../launchd/$AGENT_LABEL.plist"
   [[ -f "$template" ]] || die "missing $template"
   mkdir -p "$HOME/Library/LaunchAgents"
-  sed -e "s|__CTL__|$SCRIPT_DIR/slotstream-ctl.sh|g" -e "s|__LOG__|$LOG|g" -e "s|__HOME__|$HOME|g" "$template" > "$AGENT_PLIST"
+  sed -e "s|__CTL__|$SCRIPT_DIR/slotkeeper|g" -e "s|__LOG__|$LOG|g" -e "s|__HOME__|$HOME|g" "$template" > "$AGENT_PLIST"
   if [[ -n "$(server_pids)" ]]; then
     log "a server started outside launchd is running; stop it first so launchd can own the process"
     exit 1
@@ -372,24 +372,24 @@ remove_side_agent() {
 }
 
 cmd_bar() {
-  local label="local.slotstreambar" pkg="$SCRIPT_DIR/../SlotstreamBar" bin
+  local label="local.slotkeeper-bar" pkg="$SCRIPT_DIR/../Slotkeeper" bin
   case "${1:-status}" in
     install|restart)
-      log "building SlotstreamBar (release)"
+      log "building Slotkeeper (release)"
       (cd "$pkg" && swift build -c release 2>&1 | tail -1)
-      bin="$(cd "$pkg" && swift build -c release --show-bin-path)/SlotstreamBar"
+      bin="$(cd "$pkg" && swift build -c release --show-bin-path)/Slotkeeper"
       [[ -x "$bin" ]] || die "build did not produce $bin"
-      pkill -x SlotstreamBar 2>/dev/null || true
-      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotstreambar.log"
+      pkill -x Slotkeeper 2>/dev/null || true
+      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotkeeper-bar.log"
       ;;
-    uninstall) remove_side_agent "$label"; pkill -x SlotstreamBar 2>/dev/null || true ;;
-    status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x SlotstreamBar | head -1 | sed 's/^/pid /')" ;;
+    uninstall) remove_side_agent "$label"; pkill -x Slotkeeper 2>/dev/null || true ;;
+    status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x Slotkeeper | head -1 | sed 's/^/pid /')" ;;
     *) die "bar install|uninstall|restart|status" ;;
   esac
 }
 
 cmd_monitor() {
-  local label="local.slotstream-monitor"
+  local label="local.slotkeeper-monitor"
   case "${1:-status}" in
     start) pkill -f "scripts/monitor.sh" 2>/dev/null || true; install_side_agent "$label" "$SCRIPT_DIR/monitor.sh" "$SLOTSTREAM_HOME/monitor.log" ;;
     stop) remove_side_agent "$label" ;;
@@ -399,7 +399,7 @@ cmd_monitor() {
 }
 
 cmd_exerciser() {
-  local label="local.slotstream-exerciser" pause="$SLOTSTREAM_HOME/exerciser.pause" state="$SLOTSTREAM_HOME/exerciser.state.json"
+  local label="local.slotkeeper-exerciser" pause="$SLOTSTREAM_HOME/exerciser.pause" state="$SLOTSTREAM_HOME/exerciser.state.json"
   case "${1:-status}" in
     start) rm -f "$pause"; install_side_agent "$label" "$SCRIPT_DIR/exerciser.py" "$SLOTSTREAM_HOME/exerciser.log" ;;
     stop) remove_side_agent "$label" ;;

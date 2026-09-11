@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>local.slotstream</string>
+  <string>local.slotkeeper</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>__CTL__</string>
     <string>run</string>
   </array>
-  <!-- Start at login. Set to false to keep a manual `slotstream-ctl.sh start`. -->
+  <!-- Start at login. Set to false to keep a manual `slotkeeper start`. -->
   <key>RunAtLoad</key>
   <true/>
   <!-- Restart only after a crash (non-zero exit). A clean SIGTERM stop stays stopped. -->
@@ -20,7 +20,7 @@
     <false/>
   </dict>
   <!-- Bounded backoff: launchd will not respawn faster than this. Bad config (port held,
-       missing weights) exits quickly and repeatedly; check `slotstream-ctl.sh logs`. -->
+       missing weights) exits quickly and repeatedly; check `slotkeeper logs`. -->
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>ExitTimeOut</key>

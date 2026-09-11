@@ -39,7 +39,7 @@ The implementation has two parts:
 - Model: `qwen3.8-flash-next:4bit`
 - Context limit: 32,768 tokens (everyday profile; `deep` = 65,536 on request)
 - Output limit: 4,096 tokens
-- Supervisor: LaunchAgent `local.slotstream` running `scripts/slotstream-ctl.sh run`
+- Supervisor: LaunchAgent `local.slotkeeper` running `scripts/slotkeeper run`
 - Effective server command: `slotstream serve --model qwen3.8-flash-next:4bit --port 11435 --max-context 32768 --max-prefill-wait 10 --vision off`
 - Persistent settings: `~/.slotstream/ctl.env` (`SLOTSTREAM_PORT=11435`), `~/.slotstream/profile` (`everyday`)
 - Server log: `~/.slotstream/slotstream.log` (rotated at 10 MB by the control script)
@@ -127,7 +127,7 @@ Previous releases stay under `~/.slotstream/releases/` for rollback:
   files kept beside it as `*.0.2.14.original`.
 
 Roll back with `scripts/install-release.sh --rollback <release-dir>` followed by
-`scripts/slotstream-ctl.sh restart`.
+`scripts/slotkeeper restart`.
 
 ## Validation Evidence
 
@@ -236,7 +236,7 @@ readiness):
 ```sh
 nohup ~/.slotstream/bin/slotstream serve --max-context 65536 >> ~/.slotstream/slotstream.log 2>&1 &
 # or
-scripts/slotstream-ctl.sh start deep
+scripts/slotkeeper start deep
 ```
 
 Then verify the process, health response, and artifact hashes. Restart OpenCode
@@ -245,10 +245,10 @@ after plugin changes so the current process loads the new plugin code.
 With the LaunchAgent installed the same sequence is:
 
 ```sh
-scripts/slotstream-ctl.sh stop
+scripts/slotkeeper stop
 scripts/install-release.sh <source tree>      # new release dir + symlink switch
-scripts/slotstream-ctl.sh start               # via launchd; waits for ready
-scripts/slotstream-ctl.sh status
+scripts/slotkeeper start               # via launchd; waits for ready
+scripts/slotkeeper status
 scripts/bench.py --label <what changed>
 ```
 
@@ -278,7 +278,7 @@ scripts/bench.py --label <what changed>
 - `89a3631` Document Slotstream recovery setup
 - `c4bb5d1` Add CLAUDE.md
 
-Operational tooling (`scripts/`, `launchd/`, `SlotstreamBar/`) was added on
+Operational tooling (`scripts/`, `launchd/`, `Slotkeeper/`) was added on
 2026-09-11; see `LOCAL_LLM_ROADMAP.md` "Tooling Added". Use
-`scripts/slotstream-ctl.sh bundle` to capture the state described in this file
+`scripts/slotkeeper bundle` to capture the state described in this file
 before and after a rebuild.

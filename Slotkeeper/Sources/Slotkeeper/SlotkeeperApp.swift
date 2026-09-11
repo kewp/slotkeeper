@@ -4,10 +4,10 @@ import SwiftUI
 /// Menu-bar prototype that supervises the local Slotstream server.
 ///
 /// It never loads the model itself. It polls the localhost API for state and shells out to
-/// `scripts/slotstream-ctl.sh` for lifecycle actions, so an engine failure cannot take down
+/// `scripts/slotkeeper` for lifecycle actions, so an engine failure cannot take down
 /// the UI. Run with `swift run` from the package directory; the dock icon is suppressed.
 @main
-struct SlotstreamBarApp: App {
+struct SlotkeeperApp: App {
     @StateObject private var status = StatusModel()
 
     init() {
@@ -84,7 +84,7 @@ struct StatusMenu: View {
             Text(last).font(.caption).lineLimit(4)
         }
         Divider()
-        Button("Quit SlotstreamBar") { NSApplication.shared.terminate(nil) }
+        Button("Quit Slotkeeper") { NSApplication.shared.terminate(nil) }
     }
 }
 
@@ -127,8 +127,8 @@ final class StatusModel: ObservableObject {
         // Package dir -> repo root/scripts when run with `swift run`.
         let candidates = [
             URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/slotstream-ctl.sh").path,
-            NSHomeDirectory() + "/opencode-model-stats/scripts/slotstream-ctl.sh",
+                .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/slotkeeper").path,
+            NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper",
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[1]
     }()
@@ -311,7 +311,7 @@ final class StatusModel: ObservableObject {
 
     private func readExerciser() -> ExerciserState {
         var st = ExerciserState()
-        st.installed = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.slotstream-exerciser.plist")
+        st.installed = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.slotkeeper-exerciser.plist")
         if let flag = try? String(contentsOf: home.appendingPathComponent("exerciser.pause"), encoding: .utf8) {
             st.pauseFlag = flag.trimmingCharacters(in: .whitespacesAndNewlines)
         }

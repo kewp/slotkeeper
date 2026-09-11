@@ -1,7 +1,7 @@
-# OpenCode Model Stats + Slotstream Ops
+# Slotkeeper
 
-Run a local LLM on a MacBook, keep it running, keep the Mac usable, and see
-what it is doing. Built around [Slotstream](#what-you-need) serving
+Keep a local LLM running on a MacBook, keep the Mac usable, and see what the
+model is doing. Built around [Slotstream](#what-you-need) serving
 Qwen3.8-Flash-Next on Apple Silicon and [OpenCode](https://opencode.ai) as
 the client.
 
@@ -10,10 +10,10 @@ What you get:
 - **OpenCode plugin** (`model-stats.ts`): a live toast while the model reads
   your prompt, then a full report: tokens, cache hit rate, time to first
   token, prefill and decode rates, memory plan, and clear failure diagnostics.
-- **Server supervision** (`scripts/slotstream-ctl.sh`): start at login,
+- **Server supervision** (`scripts/slotkeeper`): start at login,
   restart after a crash, named context profiles, port-conflict and disk checks,
   log rotation, support bundle, release install with rollback.
-- **Menu-bar app** (`SlotstreamBar/`): state, memory pressure, expert cache,
+- **Menu-bar app** (`Slotkeeper/`, the Swift package): state, memory pressure, expert cache,
   the request in flight with prefill progress, the background tests, and a
   dashboard window with charts.
 - **Continuous exerciser** (`scripts/exerciser.py`): a rotating suite of
@@ -43,8 +43,8 @@ OpenCode 1.18.30. Expect rough edges elsewhere and read the traps in
 ## Quick start
 
 ```sh
-git clone https://github.com/kewp/opencode-model-stats ~/opencode-model-stats
-cd ~/opencode-model-stats
+git clone https://github.com/kewp/slotkeeper ~/slotkeeper
+cd ~/slotkeeper
 scripts/setup.sh
 ```
 
@@ -57,18 +57,20 @@ afterwards and pick the `slotstream` provider.
 Everyday commands:
 
 ```sh
-scripts/slotstream-ctl.sh status            # process, port, plan, cache, pressure, profile
-scripts/slotstream-ctl.sh restart deep      # 65K window for a long session; 'restart everyday' for 32K
-scripts/slotstream-ctl.sh exerciser status  # background suite; also pause / resume / report
-scripts/slotstream-ctl.sh logs 100
+scripts/slotkeeper status            # process, port, plan, cache, pressure, profile
+scripts/slotkeeper restart deep      # 65K window for a long session; 'restart everyday' for 32K
+scripts/slotkeeper exerciser status  # background suite; also pause / resume / report
+scripts/slotkeeper logs 100
 scripts/report.py --hours 24                # what has been measured
 scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # TTFT by prompt size
 scripts/bench.py --label mytest             # one-off measurement
 scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)
-scripts/slotstream-ctl.sh bundle            # support bundle for bug reports
+scripts/slotkeeper bundle            # support bundle for bug reports
 ```
 
-`scripts/slotstream-ctl.sh` with no arguments lists everything.
+`scripts/slotkeeper` with no arguments lists everything. Put `scripts/` on
+your `PATH` or symlink it to use `slotkeeper status` from anywhere:
+`ln -s ~/slotkeeper/scripts/slotkeeper /usr/local/bin/slotkeeper`.
 
 ## How the pieces fit
 
@@ -76,13 +78,13 @@ scripts/slotstream-ctl.sh bundle            # support bundle for bug reports
 OpenCode ──plugin──▶ toasts + log records + ~/.slotstream/opencode-active
    │
    ▼  http://localhost:<port>/v1
-Slotstream server  ◀── slotstream-ctl.sh (launchd, profiles, caffeinate on AC)
+Slotstream server  ◀── slotkeeper (launchd, profiles, caffeinate on AC)
    ▲        │
    │        └── /api/ps, /api/show ──▶ monitor.sh (30 s samples) ─┐
    │                                                             ▼
 exerciser.py (tasks, yields to OpenCode/battery/pressure) ──▶ ~/.slotstream/metrics/*.jsonl
                                                                  │
-SlotstreamBar (menu bar + dashboard) ◀───────────────────────────┘
+Slotkeeper (menu bar + dashboard) ◀───────────────────────────┘
 ```
 
 Profiles set the context window and are kept in `~/.slotstream/profile`:
