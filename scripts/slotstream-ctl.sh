@@ -303,7 +303,7 @@ install_side_agent() {
   <key>Nice</key><integer>10</integer>
 </dict></plist>
 PLIST
-  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then sleep 2; fi   # let the old instance exit before reloading
   launchctl bootstrap "gui/$(id -u)" "$plist"
   log "installed and started $label"
 }
