@@ -19,10 +19,19 @@ reasoning; this is the state.
 - Done today: 32K switch, port move, patched builds ×3, retry contract and
   stale-pressure fix verified, exerciser and sweep mode, dashboard, live
   active-request stats, `slotkeeper patch` one-command rebuild, hand-off docs.
-- Next, in order: (1) context sweep on everyday then deep, (2) full-window
-  prefix retention in Slotstream (`APP_IMPLEMENTATION.md` C2), (3)
-  done: title generation disabled in OpenCode, (4) app Stage A
-  (`APP_IMPLEMENTATION.md`), (5) upstream the two patches
+- Evening: the context sweep on everyday is running (Karl started it).
+  Full-window prefix retention (C2) is written: third patch
+  `patches/slotstream-0.2.14-prefix-retention.patch`, knob
+  `SLOTSTREAM_PREFIX_CACHE_TOKENS=full`, exerciser task `multi-turn-long`.
+  Not built: a Swift build loads every core while the sweep and an OpenCode
+  session were using the model.
+- Next, in order: (1) when the Mac is free, `scripts/slotkeeper patch
+  --build-only`, fix whatever the compiler and `make checks` say, install,
+  set `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in `~/.slotstream/ctl.env`,
+  restart, restart the exerciser so it picks up `multi-turn-long`, and
+  compare turn-2 TTFT before and after; (2) read the sweep with
+  `scripts/report.py`, then run it on deep; (3) app Stage A
+  (`APP_IMPLEMENTATION.md`); (4) upstream the three patches
   (`patches/README.md` has the PR text).
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
   Mac must stay usable, a cheaper model may continue the work (hence the

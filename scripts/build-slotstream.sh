@@ -37,6 +37,7 @@ patch_status() {
   local dump; dump="$(strings "$exe" 2>/dev/null || true)"
   if grep -q "try your request again after memory becomes available" <<<"$dump"; then echo "  retry wording patch:   present"; else echo "  retry wording patch:   absent"; fi
   if grep -q "stale threshold" <<<"$dump"; then echo "  stale pressure patch:  present"; else echo "  stale pressure patch:  absent"; fi
+  if grep -q "prefix retention ceiling must be between" <<<"$dump"; then echo "  prefix retention patch: present"; else echo "  prefix retention patch: absent"; fi
 }
 if (( STATUS )); then patch_status; exit 0; fi
 

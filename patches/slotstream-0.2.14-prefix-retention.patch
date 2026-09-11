@@ -1,0 +1,178 @@
+diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swift
+--- a/Sources/Slotstream/Governor.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/Governor.swift	2026-09-11 18:52:39
+@@ -152,9 +152,18 @@
+             return (p.prefillChunk, p.prefixCacheTokens)
+         }
+         let gb = Geometry.gb(targetSlots)
++        let policy = i.runtimeAllocationPolicy
++        // An explicit retention ceiling is the user's stated intent, like an
++        // explicit pool size: a pressure shed drops the held state (apply()
++        // does that before resizing) but does not lower the ceiling it may
++        // refill to. Auto retention follows the pool as before.
++        let retention: Int
++        if policy?.prefixCacheEnabled == false { retention = 0 }
++        else if let explicit = policy?.prefixCacheTokens { retention = min(explicit, i.maxContextTokens) }
++        else { retention = Planner.prefixCacheTokensFor(poolBudgetGB: gb, contextCap: i.maxContextTokens) }
+         return (
+-            min(Planner.prefillChunkFor(poolBudgetGB: gb, contextCap: i.maxContextTokens), i.runtimeAllocationPolicy?.prefillChunkOverride ?? 4096),
+-            i.runtimeAllocationPolicy?.prefixCacheEnabled == false ? 0 : Planner.prefixCacheTokensFor(poolBudgetGB: gb, contextCap: i.maxContextTokens))
++            min(Planner.prefillChunkFor(poolBudgetGB: gb, contextCap: i.maxContextTokens), policy?.prefillChunkOverride ?? 4096),
++            retention)
+     }
+ 
+     public static func decide(_ i: Inputs) -> Decision {
+diff -ruN a/Sources/Slotstream/Plan.swift b/Sources/Slotstream/Plan.swift
+--- a/Sources/Slotstream/Plan.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/Plan.swift	2026-09-11 18:52:39
+@@ -59,13 +59,23 @@
+ public struct RuntimeAllocationPolicy: Equatable, Sendable {
+     public let prefillChunkOverride: Int?
+     public let prefixCacheEnabled: Bool
++    /// Explicit retention ceiling in tokens (`--prefix-cache-tokens n|full`).
++    /// nil sizes retention from the pool budget as before. The planner caps
++    /// it at the context window and charges it against the pool before
++    /// sizing experts, so a larger ceiling buys reuse with expert capacity.
++    public let prefixCacheTokens: Int?
+ 
+-    public init(prefillChunkOverride: Int? = nil, prefixCacheEnabled: Bool = true) throws {
++    public init(prefillChunkOverride: Int? = nil, prefixCacheEnabled: Bool = true,
++                prefixCacheTokens: Int? = nil) throws {
+         if let chunk = prefillChunkOverride, !(256 ... 4096).contains(chunk) {
+             throw PlanError("runtime allocation planning requires a prefill chunk between 256 and 4096")
+         }
++        if let tokens = prefixCacheTokens, !(1 ... ContextPolicy.maxTokens).contains(tokens) {
++            throw PlanError("prefix retention ceiling must be between 1 and \(ContextPolicy.maxTokens) tokens, or full")
++        }
+         self.prefillChunkOverride = prefillChunkOverride
+         self.prefixCacheEnabled = prefixCacheEnabled
++        self.prefixCacheTokens = prefixCacheTokens
+     }
+ }
+ 
+@@ -300,6 +310,7 @@
+         if let policy = runtimeAllocationPolicy {
+             d["runtime_prefix_cache_enabled"] = policy.prefixCacheEnabled
+             if let chunk = policy.prefillChunkOverride { d["runtime_prefill_override"] = chunk }
++            if let tokens = policy.prefixCacheTokens { d["runtime_prefix_cache_tokens"] = tokens }
+         }
+         if !notes.isEmpty { d["notes"] = notes }
+         return d
+@@ -318,14 +329,20 @@
+             return p // Never credit the same reservation twice.
+         }
+         let chunk = policy.prefillChunkOverride ?? p.prefillChunk
+-        let prefixTokens = policy.prefixCacheEnabled ? p.prefixCacheTokens : 0
++        // An explicit ceiling is bounded by the window: a match needs the
++        // prompt to extend the held state, and a prompt longer than the
++        // window is refused before it could.
++        let requestedRetention = policy.prefixCacheTokens.map { min($0, p.maxContextTokens) }
++        let prefixTokens = policy.prefixCacheEnabled ? (requestedRetention ?? p.prefixCacheTokens) : 0
+         let freed = prefillCostGB(p.prefillChunk) - prefillCostGB(chunk)
+             + prefixCacheCostGB(tokens: p.prefixCacheTokens) - prefixCacheCostGB(tokens: prefixTokens)
+         var slots = p.slots
+         if p.targetGB != nil, freed != 0 {
+             let remaining = p.poolGB + freed
+             guard remaining.isFinite, remaining + 1e-9 >= Geometry.gb(Geometry.floorSlots) else {
+-                throw PlanError("runtime prefill reservation cannot fit above the minimum expert pool; lower the chunk or raise the memory target")
++                throw PlanError(String(format:
++                    "insufficient_memory: runtime prefill and prefix retention reservations (%.1f GB) cannot fit above the minimum expert pool; lower --prefix-cache-tokens or the chunk, or raise the memory target",
++                    prefillCostGB(chunk) + prefixCacheCostGB(tokens: prefixTokens)))
+             }
+             slots = Geometry.slotsForPoolGB(remaining)
+         }
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-11 16:44:16
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-11 18:52:39
+@@ -131,6 +131,47 @@
+         imageCache.drop()
+         c.equal("explicit drop releases retained state", imageCache.heldTokens, 0)
+         c.expect("drop preserves the enabled policy", imageCache.enabled)
++
++        // An explicit retention ceiling (--prefix-cache-tokens n|full) is
++        // capped by the window and paid for out of the expert pool, so the
++        // plan's expected peak does not move; it cannot fit at the floor.
++        let tight = try Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 10,
++            ramGB: 24, workingSetGB: 18, availableGB: 20, simulated: true)
++        c.expect("fixture: auto retention on a tight target is below the window",
++            tight.prefixCacheTokens < tight.maxContextTokens)
++        let full = try Planner.applyingRuntimePolicy(tight,
++            policy: RuntimeAllocationPolicy(prefixCacheTokens: ContextPolicy.maxTokens))
++        c.equal("full retention is capped at the context window", full.prefixCacheTokens, tight.maxContextTokens)
++        c.expect("full retention is charged against the expert pool", full.slots < tight.slots)
++        let paid = (tight.poolGB + Planner.prefixCacheCostGB(tokens: tight.prefixCacheTokens))
++            - (full.poolGB + Planner.prefixCacheCostGB(tokens: full.prefixCacheTokens))
++        c.expect("pool plus retention is conserved within one expert record",
++            abs(paid) <= Geometry.recordBytes / 1e9 + 1e-6, "difference \(paid) GB")
++        c.expect("full retention does not raise the expected peak",
++            full.expectedPeakGB <= tight.expectedPeakGB + Geometry.recordBytes / 1e9 + 1e-6)
++        c.equal("full retention is reported in /api/show", full.json()["runtime_prefix_cache_tokens"] as? Int, ContextPolicy.maxTokens)
++        let explicit = try Planner.applyingRuntimePolicy(tight, policy: RuntimeAllocationPolicy(prefixCacheTokens: 12_000))
++        c.equal("explicit token ceiling is honoured", explicit.prefixCacheTokens, 12_000)
++        let disabled = try Planner.applyingRuntimePolicy(tight,
++            policy: RuntimeAllocationPolicy(prefixCacheEnabled: false, prefixCacheTokens: 12_000))
++        c.equal("--no-prefix-cache wins over an explicit ceiling", disabled.prefixCacheTokens, 0)
++        for invalid in [Int.min, -1, 0, ContextPolicy.maxTokens + 1, Int.max] {
++            do {
++                _ = try RuntimeAllocationPolicy(prefixCacheTokens: invalid)
++                c.expect("invalid retention \(invalid) refuses before allocation", false)
++            } catch { c.expect("invalid retention \(invalid) refuses before allocation", true) }
++        }
++        let inputs = GovernorPolicy.Inputs(currentSlots: full.slots, availableGB: 0,
++            ramGB: full.ramGB, workingSetGB: full.workingSetGB, ramPercent: full.ramPercent,
++            maxContextTokens: full.maxContextTokens, runtimeAllocationPolicy: full.runtimeAllocationPolicy)
++        let shed = GovernorPolicy.liveControls(for: Geometry.floorSlots, inputs: inputs)
++        c.equal("governor shed keeps the explicit ceiling", shed.prefixCacheTokens, full.maxContextTokens)
++        let floor = try Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 8.1,
++            ramGB: 51.54, workingSetGB: 40, availableGB: 40, simulated: true)
++        do {
++            _ = try Planner.applyingRuntimePolicy(floor, policy: RuntimeAllocationPolicy(prefixCacheTokens: ContextPolicy.maxTokens))
++            c.expect("full retention at the floor is refused, not borrowed", false)
++        } catch { c.expect("full retention at the floor is refused, not borrowed", true, "\(error)") }
+         return c.report()
+     }
+ }
+diff -ruN a/Sources/slotstream-cli/main.swift b/Sources/slotstream-cli/main.swift
+--- a/Sources/slotstream-cli/main.swift	2026-09-11 16:44:16
++++ b/Sources/slotstream-cli/main.swift	2026-09-11 18:52:39
+@@ -120,6 +120,22 @@
+                 """))
+     var vision: String = "auto"
+ 
++    @Option(
++        name: .customLong("prefix-cache-tokens"),
++        help: ArgumentHelp(
++            "Conversation state the prefix cache may retain, in tokens: a number or full (default auto).",
++            discussion: """
++                Auto reserves a tenth of the pool budget, which on a tight \
++                machine holds far less than one long conversation, so every \
++                follow-up turn re-prefills the whole history. full retains up \
++                to the context window (~27 KB per token, charged against the \
++                expert pool before it is sized, so decode gets slightly \
++                slower and follow-up turns much faster). Refused at startup \
++                if it cannot fit above the minimum pool. Also \
++                SLOTSTREAM_PREFIX_CACHE_TOKENS.
++                """))
++    var prefixCacheTokens: String?
++
+     // Resolved once here so the tokenizer, the draft-head probe, and the index
+     // all see the real directory; Foundation will not list a symlinked one.
+     var modelURL: URL { ModelLocator.resolve(model).resolvingSymlinksInPath() }
+@@ -182,8 +198,16 @@
+             guard let value = Int(raw) else { throw PlanError("SLOTSTREAM_PREFILL_CHUNK must be an integer") }
+             chunk = value
+         } else { chunk = nil }
++        let retention: Int?
++        if let raw = prefixCacheTokens ?? env["SLOTSTREAM_PREFIX_CACHE_TOKENS"] {
++            let trimmed = raw.trimmingCharacters(in: .whitespaces).lowercased()
++            if trimmed == "full" { retention = ContextPolicy.maxTokens }  // the planner caps it at the window
++            else if let value = Int(trimmed) { retention = value }
++            else { throw PlanError("--prefix-cache-tokens must be a token count or full (got \(raw))") }
++        } else { retention = nil }
+         return try RuntimeAllocationPolicy(prefillChunkOverride: chunk,
+-            prefixCacheEnabled: prefixCacheEnabled && env["SLOTSTREAM_PREFIX_CACHE"] != "0")
++            prefixCacheEnabled: prefixCacheEnabled && env["SLOTSTREAM_PREFIX_CACHE"] != "0",
++            prefixCacheTokens: retention)
+     }
+ 
+     /// If the pinned model isn't fully downloaded and we have a terminal, ask

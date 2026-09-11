@@ -37,6 +37,8 @@
 #   SLOTSTREAM_MODEL (qwen3.8-flash-next:4bit)   SLOTSTREAM_MAX_PREFILL_WAIT (10 minutes)
 #   SLOTSTREAM_MAX_RAM_PERCENT (unset = Slotstream default 70)   SLOTSTREAM_VISION (off)
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
+#   SLOTSTREAM_PREFIX_CACHE_TOKENS (unset = Slotstream auto; a number or `full` retains whole
+#     conversations, needs the prefix-retention patch; read by the binary itself from the environment)
 #   Persist any of these in ~/.slotstream/ctl.env (KEY=value lines); it is read by this script,
 #   monitor.sh, bench.py and Slotkeeper, so one file defines the port everywhere.
 set -euo pipefail

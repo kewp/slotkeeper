@@ -361,6 +361,32 @@ def t_multi_turn():
     return r3, {"ok": ok, "note": note}, {"turn1_ttft_s": r1["ttft_s"], "turn2_ttft_s": r2["ttft_s"], "turn3_ttft_s": r3["ttft_s"], "turns": 3}
 
 
+def t_multi_turn_long(target_tokens=20000):
+    """A 20K-token conversation: turn 1 pays the full prefill, turns 2 and 3 should reuse it.
+    Passes only when turn-2 TTFT is well below turn-1 (half or less), which needs the server
+    to retain the whole conversation (Slotstream --prefix-cache-tokens full, patches/README.md)."""
+    prompt, est, n = build_codebase_prompt(target_tokens)
+    if n == 0:
+        return None, {"ok": False, "note": "corpus empty"}, {}
+    msgs = [{"role": "user", "content": f"Here are {n} files from a codebase. In one paragraph, what does the project do?\n\n{prompt}"}]
+    r1 = chat(msgs, max_tokens=150)
+    if r1["error"]:
+        return r1, {"ok": False, "note": "turn 1 failed"}, {"turn": 1, "files": n, "est_prompt_tokens": est}
+    msgs += [{"role": "assistant", "content": r1["text"]}, {"role": "user", "content": "Which of those files is the riskiest, and why? Two sentences."}]
+    r2 = chat(msgs, max_tokens=150)
+    if r2["error"]:
+        return r2, {"ok": False, "note": "turn 2 failed"}, {"turn": 2, "turn1_ttft_s": r1["ttft_s"], "files": n, "est_prompt_tokens": est}
+    msgs += [{"role": "assistant", "content": r2["text"]}, {"role": "user", "content": "Name one function in that file. One line."}]
+    r3 = chat(msgs, max_tokens=80)
+    t1, t2 = r1["ttft_s"] or 0, r2["ttft_s"] or 0
+    reuse = t1 > 0 and t2 <= 0.5 * t1
+    ok = not r3["error"] and reuse
+    note = "" if ok else ("turn 3 failed" if r3["error"] else f"turn 2 TTFT {t2}s not well below turn 1 {t1}s (whole conversation not retained?)")
+    r3["prefix_reuse_ok"] = reuse
+    return r3, {"ok": ok, "note": note}, {"turn1_ttft_s": r1["ttft_s"], "turn2_ttft_s": r2["ttft_s"], "turn3_ttft_s": r3["ttft_s"],
+                                          "turns": 3, "files": n, "est_prompt_tokens": est}
+
+
 TOOLS = [{"type": "function", "function": {
     "name": "read_file",
     "description": "Read a file from the repository",
@@ -450,6 +476,7 @@ TASKS = {
     "short-chat": (t_short_chat, 2, False),
     "code-review": (t_code_review, 2, False),
     "multi-turn": (t_multi_turn, 1, False),
+    "multi-turn-long": (t_multi_turn_long, 1, True),
     "tool-call": (t_tool_call, 1, False),
     "json-answer": (t_json_answer, 1, False),
     "codebase-8k": (lambda: t_codebase_summary(8000), 1, True),

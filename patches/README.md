@@ -1,13 +1,17 @@
 # Slotstream patches
 
-Two patches against [Slotstream](https://github.com/carloslfu/slotstream)
-0.2.14 source. Apply in this order; each is independent of Slotkeeper and is a
-candidate for an upstream pull request. Both pass Slotstream's T0 check suite
-(`make checks`) with the new checks included.
+Three patches against [Slotstream](https://github.com/carloslfu/slotstream)
+0.2.14 source. Apply in this order (alphabetical, which is what
+`scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
+candidate for an upstream pull request. The first two pass Slotstream's T0
+check suite (`make checks`) with the new checks included; the third was
+written on 2026-09-11 and has not been built yet (see the status line at
+the bottom of this file).
 
 | Patch | What it changes | New check |
 | --- | --- | --- |
 | `slotstream-0.2.14-opencode-retry.patch` | Pre-output memory-pressure failures say `try your request again`, which OpenCode's retry classifier recognises; post-output failures keep the non-retryable wording so a replay cannot duplicate text or tool effects. Non-cancellation request failures are logged to stderr. | assertions added to `context-serving` (queued-pressure and governor-unavailable pre-output paths) |
+| `slotstream-0.2.14-prefix-retention.patch` | `serve --prefix-cache-tokens <n\|full>` (or `SLOTSTREAM_PREFIX_CACHE_TOKENS`) sets how much conversation state the prefix cache may retain. The planner caps it at the context window, charges it against the expert pool before sizing experts, refuses at startup if the pool would fall below its floor, and reports it in `/api/show` as `runtime_prefix_cache_tokens`. The governor keeps the explicit ceiling across resizes. | assertions added to `prefix-client-capacity` (window cap, pool charge, peak unchanged, `--no-prefix-cache` precedence, invalid values, governor shed, refusal at the floor) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
 
 ## Apply and build
@@ -28,7 +32,7 @@ Manually:
 ```sh
 tar -xzf build-source.tar.gz            # or a stock 0.2.14 checkout
 cd <source>
-for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-stale-pressure; do
+for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-prefix-retention slotstream-0.2.14-stale-pressure; do
   patch --dry-run --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
   patch --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
 done
@@ -63,6 +67,23 @@ patch, requests were served and the log read `OS level still elevated but 10.7
 GB reclaimable (stale threshold 6.4 GB); treating it as stale and admitting
 requests`. Real pressure leaves little reclaimable memory, so it still refuses,
 and the governor's shed-on-event behaviour is untouched.
+
+**Prefix retention.** Stock Slotstream sizes the prefix cache at a tenth of
+the pool budget. On a 24 GB machine with a 32K window that is about 12,000
+tokens across all held conversations (`0/11940 tok held` in
+`slotkeeper status`), so any coding-agent conversation longer than that is
+evicted on every turn and each follow-up re-prefills the whole history at
+tens of tokens per second. On 2026-09-11 the everyday profile logged 7
+misses and 12 evictions against 1 hit. A full 32K window costs 0.9 GB plus
+a fixed 0.34 GB for the extra entries, roughly 9 experts per layer of
+decode capacity, which is a good trade when follow-up turns are the common
+case. The patch makes the ceiling a knob and keeps the memory ledger honest
+about it: the pool shrinks by exactly what retention grows, so the expected
+peak does not move, and a setting that would push the pool below its floor
+is refused before the model loads. Use it with
+`SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in `~/.slotstream/ctl.env`; the
+exerciser's `multi-turn-long` task (20K-token conversation, turn-2 TTFT must
+be at most half of turn-1) is the qualification.
 
 ## Upstream pull request text
 
@@ -108,3 +129,38 @@ and the governor's shed-on-event behaviour is untouched.
 > threshold floor and scaling, threshold edge). Verified live on a 24 GB M4
 > Pro with a 90-second simulated critical level: request served, decision
 > logged.
+
+### PR 3: Let `serve` choose how much conversation state the prefix cache retains
+
+> `Planner.prefixCacheTokensFor` sizes prefix retention at a tenth of the
+> pool budget. On a small machine that is a few thousand tokens shared by
+> every held conversation, so a chat client whose history is longer than
+> that never gets a hit: each turn evicts the previous state and re-prefills
+> the whole conversation. On a 24 GB Mac with a 32K window the ceiling is
+> about 12K tokens and a typical coding-agent session sees only misses.
+>
+> This adds `--prefix-cache-tokens <n|full>` to `serve` (also
+> `SLOTSTREAM_PREFIX_CACHE_TOKENS`), carried on `RuntimeAllocationPolicy`
+> next to the existing prefix-cache and prefill-chunk controls. The planner
+> caps the value at the context window, charges `prefixCacheCostGB` against
+> the pool before sizing experts so the expected peak is unchanged, and
+> refuses a value that would push the pool below its floor before the model
+> loads. `--no-prefix-cache` still wins. The governor's live controls keep
+> the explicit ceiling across resizes (a pressure shed still drops the held
+> state first, as before); auto retention is unchanged when the flag is not
+> given. `/api/show` reports `runtime_prefix_cache_tokens`.
+>
+> Tests: assertions added to the `prefix-client-capacity` T0 check: full is
+> capped at the window, the pool pays for it within one expert record, the
+> expected peak does not rise, an explicit count is honoured, disabled
+> retention wins, invalid values are refused, the governor keeps the ceiling
+> on a shed, and full at the floor plan is refused.
+
+## Status
+
+2026-09-11 evening: the prefix-retention patch is written and dry-applies to
+the patched source tree, but has not been compiled or run through `make
+checks` because the machine was busy with the context sweep and an OpenCode
+session. Next: `scripts/slotkeeper patch --build-only` when the Mac is
+free, then install, set `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in
+`~/.slotstream/ctl.env`, restart, and run `multi-turn-long`.

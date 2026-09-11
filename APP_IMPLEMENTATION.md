@@ -79,12 +79,13 @@ number. Read by the control script at start.
  "plan_after":{...same...}}
 ```
 
-Task names: `short-chat`, `code-review`, `multi-turn`, `tool-call`,
-`json-answer`, `codebase-8k`, `codebase-16k`, `codebase-max`,
+Task names: `short-chat`, `code-review`, `multi-turn`, `multi-turn-long`,
+`tool-call`, `json-answer`, `codebase-8k`, `codebase-16k`, `codebase-max`,
 `long-generation`, `context-overflow`, `cancel-mid-prefill`,
 `concurrent-pair`, and `sweep-<tokens>` from `--sweep`. `details` per task:
-`code-review` has `file`; `multi-turn` has `turn1_ttft_s`, `turn2_ttft_s`,
-`turn3_ttft_s`; `context-overflow` has `window`, `error_code`;
+`code-review` has `file`; `multi-turn` and `multi-turn-long` have
+`turn1_ttft_s`, `turn2_ttft_s`, `turn3_ttft_s` (the long one also `files`,
+`est_prompt_tokens`, and passes only when turn 2 is at most half of turn 1); `context-overflow` has `window`, `error_code`;
 `cancel-mid-prefill` has `recovery_s`; `concurrent-pair` has `wall_s`,
 `ttfts`, `queued`; codebase tasks have `files`, `est_prompt_tokens`.
 
@@ -297,6 +298,12 @@ replaces log parsing with this; the plugin replaces its ETA estimate with
 `eta_s`.
 
 ### C2. Full-window prefix retention (Slotstream, est. 2 to 4 days)
+
+Status 2026-09-11: written as `patches/slotstream-0.2.14-prefix-retention.patch`
+(steps 1 to 4 below, carried on `RuntimeAllocationPolicy.prefixCacheTokens`
+rather than a new planner parameter, so it flows through the governor for
+free) plus the `multi-turn-long` exerciser task (step 5). Not yet compiled
+or checked; see `patches/README.md` Status.
 
 Today `Planner.prefixCacheTokensFor(poolBudgetGB:contextCap:)` in
 `Sources/Slotstream/Plan.swift` (line ~485) returns 10% of the pool budget
