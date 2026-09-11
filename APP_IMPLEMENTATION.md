@@ -259,11 +259,11 @@ Goal: one table of every request, from any client.
   OpenCode sync result.
 - Releases list from `~/.slotstream/releases/` with the active one marked;
   "Roll back" runs `install-release.sh --rollback <dir>` then restart.
-- "Rebuild from source": extracts
-  `~/.slotstream/releases/<first>/build-source.tar.gz.0.2.14.original`,
-  applies `patches/*.patch` in name order, copies the metallib into
-  `Tools/lib/mlx-0.31.1.metallib`, runs `make checks && make build`, then
-  `install-release.sh`. Stream output to a pane. Takes about 5 minutes.
+- "Rebuild from source": runs `scripts/build-slotstream.sh --yes` and streams
+  its output to a pane (it extracts the shipped source, applies
+  `patches/*.patch`, runs `make checks && make build`, installs as a new
+  release and restarts). Takes about 5 minutes. `--status` gives the patch
+  state for the Server tab.
 - Log viewer: tail with a filter box; highlight `request failed` and
   `memory pressure` lines.
 - Support bundle button (exists in the menu).

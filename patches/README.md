@@ -12,6 +12,19 @@ candidate for an upstream pull request. Both pass Slotstream's T0 check suite
 
 ## Apply and build
 
+The one-command way, from the source archive that ships beside the installed
+binary (`~/.slotstream/bin/build-source.tar.gz`):
+
+```sh
+~/slotkeeper/scripts/slotkeeper patch
+```
+
+It refuses versions other than 0.2.14, skips patches that are already
+present, runs `make checks`, builds, asks before restarting, installs as a new
+release directory and keeps the old one for rollback.
+
+Manually:
+
 ```sh
 tar -xzf build-source.tar.gz            # or a stock 0.2.14 checkout
 cd <source>

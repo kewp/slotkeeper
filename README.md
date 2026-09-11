@@ -99,8 +99,17 @@ Stock Slotstream reports memory-pressure interruptions with wording that
 OpenCode's retry loop does not recognise, and it trusts the OS pressure level
 alone, which can stay elevated after the pressure is gone. Two patches against
 0.2.14 source fix that; both pass Slotstream's own T0 check suite plus new
-checks. Applying them means building Slotstream yourself; `patches/README.md`
-has the steps, the reasoning, and ready-to-paste upstream pull-request text. If you do not, everything else here still works;
+checks. Neither is needed for anything else here; install them if you want
+automatic retry after a pressure failure. One command does it, about five
+minutes with Xcode or the Command Line Tools installed:
+
+```sh
+scripts/slotkeeper patch            # extract shipped source, patch, make checks, build, install, restart
+scripts/slotkeeper patch --status   # are the patches in the installed binary?
+```
+
+`patches/README.md` has the reasoning, the manual steps, and pull-request text
+for upstreaming. If you do not, everything else here still works;
 you only lose automatic retry after a pressure failure.
 
 ## Documents

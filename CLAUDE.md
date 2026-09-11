@@ -35,7 +35,7 @@ New machine: `scripts/setup.sh` (see README). Script checks: `bash -n scripts/*.
 - "How is it going?" means: run `scripts/report.py` (add `--hours N`), `scripts/slotkeeper exerciser status`, and look at recent failures in `~/.slotstream/metrics/exerciser.jsonl`.
 - The server runs under launchd (`local.slotkeeper`). Use the control script to stop/start; do not `pkill` it, launchd will respawn it after 30 s and `pkill -f "slotstream serve"` also kills any foreground test run.
 - Scripts must stay compatible with `/bin/bash` 3.2 (launchd runs them with it): no `mapfile`, no associative arrays. `lsof` exits 1 on no match, so guard pipelines under `pipefail`.
-- Rebuilding Slotstream: extract `~/.slotstream/bin/build-source.tar.gz.0.2.14.original` (kept in the first release dir), apply the repo patch, copy `~/.slotstream/bin/mlx.metallib` to `Tools/lib/mlx-0.31.1.metallib`, then `make checks && make build` (about 5 minutes). Install with `scripts/install-release.sh`.
+- Rebuilding Slotstream: `scripts/slotkeeper patch` (extract shipped source, apply `patches/*.patch`, `make checks && make build`, install as a new release, restart; `--build-only` to skip the install; `--status` to see which patches the installed binary has). About 5 minutes. Manual steps are in `patches/README.md`.
 
 ## Deployment
 

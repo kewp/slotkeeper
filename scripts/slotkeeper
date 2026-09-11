@@ -15,6 +15,9 @@
 #   profile [name]      Show or persist the default profile in ~/.slotstream/profile.
 #   sync-opencode       Rewrite OpenCode's slotstream provider (port, context) to match the profile.
 #                       start/restart do this automatically.
+#   patch [--build-only|--yes|--status]
+#                       Patch, check, build and install Slotstream from its shipped source archive
+#                       (scripts/build-slotstream.sh). --status shows whether the patches are installed.
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
@@ -426,6 +429,7 @@ case "${1:-}" in
   profile) cmd_profile "${2:-}" ;;
   sync-opencode) sync_opencode "$(resolve_profile "${2:-}")" ;;
   bundle) cmd_bundle ;;
+  patch) exec "$SCRIPT_DIR/build-slotstream.sh" "${@:2}" ;;
   install-agent) cmd_install_agent ;;
   uninstall-agent) cmd_uninstall_agent ;;
   bar) cmd_bar "${2:-status}" ;;

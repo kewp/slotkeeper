@@ -303,6 +303,7 @@ Slotstream rebuild and none were applied to the running server.
 | `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
 | `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | run 17:01, contract holds |
 | `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
+| `scripts/build-slotstream.sh` (`slotkeeper patch`) | extract shipped source, apply patches idempotently, checks, build, install, restart; `--status` | verified build-only |
 | `scripts/setup.sh` | new-machine setup: requirement checks, settings, plugin install, provider snippet, optional services | tested against a scratch home |
 | `Slotkeeper/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle, exerciser status and pause | builds and runs |
 | `scripts/exerciser.py` | continuous 12-task suite with per-run cost and behaviour checks; yields to OpenCode, battery, pressure, pause flag | LaunchAgent `local.slotkeeper-exerciser`, started 17:15 |
