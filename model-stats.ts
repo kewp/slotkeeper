@@ -10,14 +10,40 @@ const PREFILL_REFRESH_MS = 15 * 1000
 // Marker the background exerciser watches so it never competes with a real request.
 const ACTIVE_MARKER = join(homedir(), ".slotstream", "opencode-active")
 
-function markActive(sessionID: string, agent: string) {
+type ActiveInfo = {
+  sessionID: string
+  agent: string
+  modelID: string
+  startedAt: number
+  estimatedPromptTokens?: number
+  contextLimit?: number
+  firstOutputAt?: number
+  outputChars: number
+  toolCalls: number
+  updatedAt: number
+}
+let active: ActiveInfo | undefined
+let activeWrittenAt = 0
+
+function writeActive(force = false) {
+  if (!active) return
+  const now = Date.now()
+  if (!force && now - activeWrittenAt < 1000) return
+  activeWrittenAt = now
+  active.updatedAt = now
   try {
     mkdirSync(join(homedir(), ".slotstream"), { recursive: true })
-    writeFileSync(ACTIVE_MARKER, JSON.stringify({ sessionID, agent, startedAt: Date.now() }))
+    writeFileSync(ACTIVE_MARKER, JSON.stringify(active))
   } catch {}
 }
 
+function markActive(sessionID: string, agent: string, modelID: string, contextLimit?: number) {
+  active = { sessionID, agent, modelID, startedAt: Date.now(), contextLimit, outputChars: 0, toolCalls: 0, updatedAt: Date.now() }
+  writeActive(true)
+}
+
 function clearActive() {
+  active = undefined
   try {
     rmSync(ACTIVE_MARKER, { force: true })
   } catch {}
@@ -383,13 +409,17 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
       const runtimeURL = getRuntimeURL(baseURL)
       contextByModel.set(input.model.id, input.model.limit.context)
       if (runtimeURL) runtimeURLByModel.set(input.model.id, runtimeURL)
-      markActive(input.sessionID, input.agent)
+      markActive(input.sessionID, input.agent, input.model.id, input.model.limit.context)
       startPrefill(input.sessionID, input.agent, input.model.id, input.model.limit.context, runtimeURL)
       const key = requestKey(input.sessionID, input.agent)
       void estimatePromptTokens(input.sessionID, input.agent).then((estimatedPromptTokens) => {
         const request = inFlight.get(key)
         if (!request || !estimatedPromptTokens) return
         request.estimatedPromptTokens = estimatedPromptTokens
+        if (active && active.sessionID === input.sessionID) {
+          active.estimatedPromptTokens = estimatedPromptTokens
+          writeActive(true)
+        }
         void showPrefill(key)
       })
     },
@@ -419,6 +449,11 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
 
       if (event.type === "message.part.updated") {
         const { part, delta } = event.properties
+        if (active && active.sessionID === part.sessionID) {
+          if ((part.type === "text" || part.type === "reasoning") && delta) active.outputChars += delta.length
+          else if (part.type === "tool" && part.state.status === "completed") active.toolCalls += 1
+          writeActive()
+        }
         const current = timing.get(part.messageID) ?? {}
         if (current.firstOutputAt) return
 
@@ -429,6 +464,10 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
         if (!streamedText && !streamedTool) return
 
         current.firstOutputAt = Date.now()
+        if (active && active.sessionID === part.sessionID && !active.firstOutputAt) {
+          active.firstOutputAt = current.firstOutputAt
+          writeActive(true)
+        }
         timing.set(part.messageID, current)
         stopPrefill(part.sessionID)
         return

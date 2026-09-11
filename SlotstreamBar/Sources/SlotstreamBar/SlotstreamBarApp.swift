@@ -44,6 +44,14 @@ struct StatusMenu: View {
             Text("Applies on next start. Keep OpenCode's context declaration in sync.").font(.caption)
         }
         Divider()
+        if let req = status.activeRequest {
+            Text("Active: \(req.source)").font(.headline)
+            ForEach(req.lines, id: \.self) { Text($0) }
+            if let cpu = status.serverCPU { Text(String(format: "server cpu %.0f%%", cpu)).font(.caption) }
+        } else {
+            Text("No request in flight").font(.headline)
+        }
+        Divider()
         Text(status.exerciserHeadline).font(.headline)
         if status.exerciser.installed {
             Text(status.exerciserSummary)
@@ -120,7 +128,7 @@ final class StatusModel: ObservableObject {
 
     init() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
@@ -169,6 +177,97 @@ final class StatusModel: ObservableObject {
         return lines
     }
 
+    // MARK: active request
+
+    struct ActiveRequest {
+        var source = ""            // "OpenCode (build)" or "Exerciser: code-review"
+        var lines: [String] = []
+    }
+    @Published var activeRequest: ActiveRequest?
+    @Published var serverCPU: Double?
+
+    /// The newest prefill progress line from the server log, if it is newer than the request start
+    /// and not yet followed by "prefill: done".
+    private func prefillProgress(since start: Date?) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: logURL) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let span: UInt64 = 16_384
+        try? handle.seek(toOffset: size > span ? size - span : 0)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n").map(String.init)
+        guard let last = lines.last(where: { $0.contains("prefill:") }) else { return nil }
+        if last.contains("prefill: done") { return nil }
+        // "[17:47:25] prefill: reading 19726 prompt tokens, ~2.0 min to the first token at this plan (...)"
+        // "[17:28:40] prefill: 4096/9125 tokens (45%), ~52 s left"
+        if let start, let stamp = last.split(separator: "]").first?.dropFirst() {
+            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+            let cal = Calendar.current
+            if let t = f.date(from: String(stamp)) {
+                var comps = cal.dateComponents([.year, .month, .day], from: start)
+                let tc = cal.dateComponents([.hour, .minute, .second], from: t)
+                comps.hour = tc.hour; comps.minute = tc.minute; comps.second = tc.second
+                if let lineDate = cal.date(from: comps), lineDate < start.addingTimeInterval(-5) { return nil }
+            }
+        }
+        var body = last
+        if let r = body.range(of: "prefill: ") { body = String(body[r.upperBound...]) }
+        if let r = body.range(of: " at this plan") { body = String(body[..<r.lowerBound]) }
+        return "prefill " + body
+    }
+
+    private func readActiveRequest(exerciser: ExerciserState, exerciserProgress: [String: Any]?) -> ActiveRequest? {
+        let iso = ISO8601DateFormatter()
+        // OpenCode first: its marker is written by the plugin while a request is in flight.
+        if let data = try? Data(contentsOf: home.appendingPathComponent("opencode-active")),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let startedMs = obj["startedAt"] as? Double {
+            let start = Date(timeIntervalSince1970: startedMs / 1000)
+            let updated = (obj["updatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? start
+            if Date().timeIntervalSince(updated) < 600 {
+                var req = ActiveRequest(source: "OpenCode (\(obj["agent"] as? String ?? "request"))")
+                let elapsed = Int(Date().timeIntervalSince(start))
+                var first = "\(elapsed / 60)m \(elapsed % 60)s elapsed"
+                if let prompt = obj["estimatedPromptTokens"] as? Int {
+                    first += " | prompt ~\(prompt.formatted()) tok"
+                    if let limit = obj["contextLimit"] as? Int, limit > 0 { first += " (\(prompt * 100 / limit)% of window)" }
+                }
+                req.lines.append(first)
+                if let firstMs = obj["firstOutputAt"] as? Double {
+                    let ttft = (firstMs - startedMs) / 1000
+                    let chars = obj["outputChars"] as? Int ?? 0
+                    let tools = obj["toolCalls"] as? Int ?? 0
+                    let genSecs = max(1, Date().timeIntervalSince1970 - firstMs / 1000)
+                    let rate = Double(chars) / 4 / genSecs
+                    req.lines.append(String(format: "generating: TTFT %.0fs, ~%d tok out, ~%.1f tok/s, %d tool calls", ttft, chars / 4, rate, tools))
+                } else if let p = prefillProgress(since: start) {
+                    req.lines.append(p)
+                } else {
+                    req.lines.append("waiting for first output")
+                }
+                return req
+            }
+        }
+        if let cur = exerciser.current {
+            var req = ActiveRequest(source: "Exerciser: \(cur)")
+            let elapsed = exerciser.currentStarted.map { Int(Date().timeIntervalSince($0)) } ?? 0
+            var first = "\(elapsed / 60)m \(elapsed % 60)s elapsed"
+            if let p = exerciserProgress, let prompt = p["prompt_tokens"] as? Int { first += " | prompt ~\(prompt.formatted()) tok" }
+            req.lines.append(first)
+            if let p = exerciserProgress, let ttft = p["ttft_s"] as? Double {
+                let out = p["output_tokens"] as? Int ?? 0
+                let rate = p["decode_tok_s"] as? Double ?? 0
+                req.lines.append(String(format: "generating: TTFT %.1fs, %d tok out, %.1f tok/s", ttft, out, rate))
+            } else if let p = prefillProgress(since: exerciser.currentStarted) {
+                req.lines.append(p)
+            } else {
+                req.lines.append("waiting for first output")
+            }
+            return req
+        }
+        return nil
+    }
+
     // MARK: exerciser
 
     struct ExerciserState {
@@ -180,6 +279,7 @@ final class StatusModel: ObservableObject {
         var currentStarted: Date?
         var updated: Date?
         var last: [String] = []
+        var progress: [String: Any]?
     }
     @Published var exerciser = ExerciserState()
 
@@ -216,6 +316,7 @@ final class StatusModel: ObservableObject {
         st.paused = obj["paused"] as? String
         st.currentStarted = (obj["current_started"] as? String).flatMap { iso.date(from: $0) }
         st.updated = (obj["updated"] as? String).flatMap { iso.date(from: $0) }
+        st.progress = obj["progress"] as? [String: Any]
         for item in (obj["last"] as? [[String: Any]] ?? []).prefix(4) {
             let task = item["task"] as? String ?? "?"
             let ok = item["ok"] as? Bool ?? false
@@ -243,8 +344,12 @@ final class StatusModel: ObservableObject {
             var plan = PlanSummary()
             if version != nil { plan = await fetchPlan() }
             let ex = readExerciser()
+            let active = readActiveRequest(exerciser: ex, exerciserProgress: ex.progress)
+            let cpu = await serverCPUPercent()
             await MainActor.run {
                 self.exerciser = ex
+                self.activeRequest = active
+                self.serverCPU = cpu
                 self.version = version ?? ""
                 self.profileName = (profile?.isEmpty == false) ? profile! : "everyday"
                 self.pressure = pressure
@@ -270,6 +375,14 @@ final class StatusModel: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    private func serverCPUPercent() async -> Double? {
+        let pid = await Shell.run("/usr/bin/pgrep", ["-f", "slotstream serve"]).stdout
+            .split(separator: "\n").first.map(String.init) ?? ""
+        guard !pid.isEmpty else { return nil }
+        let out = await Shell.run("/bin/ps", ["-o", "%cpu=", "-p", pid]).stdout
+        return Double(out.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "."))
     }
 
     private func fetchVersion() async -> String? {

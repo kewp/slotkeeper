@@ -168,6 +168,26 @@ def plan_snapshot():
     }
 
 
+_progress_written = 0.0
+
+
+def publish_progress(started, first, output_tokens, prompt_tokens=None, force=False):
+    """Writes live request progress into the state file (throttled to 2 s) for the menu-bar app."""
+    global _progress_written
+    now = time.monotonic()
+    if not force and now - _progress_written < 2:
+        return
+    _progress_written = now
+    state["progress"] = {
+        "elapsed_s": round(now - started, 1),
+        "ttft_s": round(first - started, 2) if first else None,
+        "output_tokens": output_tokens,
+        "decode_tok_s": round(output_tokens / (now - first), 2) if first and output_tokens and now > first else None,
+        "prompt_tokens": prompt_tokens,
+    }
+    write_state()
+
+
 def chat(messages, max_tokens=300, tools=None, timeout=1800, abort_after=None, extra=None):
     """Streams one chat completion. Returns a result dict; never raises."""
     body = {"model": MODEL, "messages": messages, "max_tokens": max_tokens, "stream": True,
@@ -181,6 +201,7 @@ def chat(messages, max_tokens=300, tools=None, timeout=1800, abort_after=None, e
     res = {"ttft_s": None, "total_s": None, "prompt_tokens": None, "output_tokens": 0, "text": "", "tool_calls": [],
            "finish": None, "error": None, "aborted": False}
     first = None
+    publish_progress(started, None, 0, approx_tokens("".join(m.get("content", "") for m in messages)), force=True)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             for raw in r:
@@ -213,6 +234,7 @@ def chat(messages, max_tokens=300, tools=None, timeout=1800, abort_after=None, e
                         res["text"] += piece
                         if not ev.get("usage"):
                             res["output_tokens"] += 1
+                        publish_progress(started, first, res["output_tokens"], res["prompt_tokens"])
                     for tc in d.get("tool_calls") or []:
                         idx = tc.get("index", 0)
                         while len(res["tool_calls"]) <= idx:
@@ -231,6 +253,7 @@ def chat(messages, max_tokens=300, tools=None, timeout=1800, abort_after=None, e
     except Exception as e:  # noqa: BLE001
         res["error"] = {"exception": repr(e)}
     ended = time.monotonic()
+    state["progress"] = None
     res["ttft_s"] = round(first - started, 2) if first else None
     res["total_s"] = round(ended - started, 2)
     res["decode_tok_s"] = round(res["output_tokens"] / (ended - first), 2) if first and res["output_tokens"] and ended > first else None
@@ -439,7 +462,7 @@ TASKS = {
 # ---------- scheduling & state ----------
 
 state = {"started": now(), "cycle": 0, "runs": 0, "ok": 0, "fail": 0, "current": None, "current_started": None,
-         "paused": None, "last": [], "by_task": {}, "pid": os.getpid()}
+         "paused": None, "last": [], "by_task": {}, "pid": os.getpid(), "progress": None}
 
 
 def write_state():
