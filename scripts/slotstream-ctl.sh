@@ -352,8 +352,16 @@ install_side_agent() {
   <key>Nice</key><integer>${SIDE_AGENT_NICE:-10}</integer>
 </dict></plist>
 PLIST
-  if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then sleep 2; fi   # let the old instance exit before reloading
-  launchctl bootstrap "gui/$(id -u)" "$plist"
+  # Unload the old instance and wait until launchd has actually forgotten it; bootstrapping
+  # while the teardown is still in progress fails with an opaque I/O error.
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do agent_installed "$label" || break; sleep 1; done
+  for i in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then log "installed and started $label"; return 0; fi
+    sleep 2
+  done
+  launchctl bootstrap "gui/$(id -u)" "$plist"   # last attempt, surface the error
   log "installed and started $label"
 }
 
