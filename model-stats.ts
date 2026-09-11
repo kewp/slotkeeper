@@ -179,7 +179,29 @@ type PrefixCache = {
   misses?: number
 }
 
-export const ModelStats: Plugin = async ({ client, directory }) => {
+type SystemMemoryStats = {
+  availablePercent?: number
+  pressure?: string
+  swapUsedMB?: number
+}
+
+function errorDetails(error: unknown) {
+  if (!error || typeof error !== "object") return { code: "unknown", message: String(error) }
+
+  const value = error as { name?: string; data?: { message?: string } }
+  const raw = value.data?.message ?? value.name ?? "unknown error"
+  try {
+    const parsed = JSON.parse(raw) as { code?: string; message?: string; type?: string }
+    return {
+      code: parsed.code ?? parsed.type ?? value.name ?? "unknown",
+      message: parsed.message ?? raw,
+    }
+  } catch {
+    return { code: value.name ?? "unknown", message: raw }
+  }
+}
+
+export const ModelStats: Plugin = async ({ client, directory, $ }) => {
   const timing = new Map<string, Timing>()
   const reported = new Set<string>()
   const messageAgents = new Map<string, string>()
@@ -191,11 +213,36 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
 
   const requestKey = (sessionID: string, agent: string) => `${sessionID}:${agent}`
 
-  const showToast = async (title: string, message: string, duration: number) => {
+  const showToast = async (
+    title: string,
+    message: string,
+    duration: number,
+    variant: "info" | "success" | "warning" | "error" = "info",
+  ) => {
     await client.tui.showToast({
-      body: { title, message, variant: "info", duration },
+      body: { title, message, variant, duration },
       query: { directory },
     })
+  }
+
+  const getSystemMemoryStats = async (): Promise<SystemMemoryStats> => {
+    const [pressureResult, levelResult, swapResult] = await Promise.allSettled([
+      $`memory_pressure`.quiet().nothrow(),
+      $`sysctl -n kern.memorystatus_vm_pressure_level`.quiet().nothrow(),
+      $`sysctl -n vm.swapusage`.quiet().nothrow(),
+    ])
+    const pressureText = pressureResult.status === "fulfilled" ? pressureResult.value.text() : ""
+    const levelText = levelResult.status === "fulfilled" ? levelResult.value.text().trim() : ""
+    const swapText = swapResult.status === "fulfilled" ? swapResult.value.text() : ""
+    const available = pressureText.match(/System-wide memory free percentage:\s*(\d+)%/)
+    const swap = swapText.match(/used\s*=\s*([\d.,]+)M/)
+    const pressure = levelText === "4" ? "critical" : levelText === "2" ? "warning" : levelText === "1" ? "normal" : undefined
+
+    return {
+      availablePercent: available ? Number(available[1]) : undefined,
+      pressure,
+      swapUsedMB: swap ? Number(swap[1]?.replace(",", ".")) : undefined,
+    }
   }
 
   const stopPrefill = (sessionID: string, agent?: string) => {
@@ -329,6 +376,22 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
     },
 
     event: async ({ event }) => {
+      if (event.type === "session.status" && event.properties.status.type === "retry") {
+        const tracked = [...inFlight.entries()].find(([key]) =>
+          key.startsWith(`${event.properties.sessionID}:`),
+        )?.[1]
+        if (!tracked) return
+
+        const waitMs = Math.max(0, event.properties.status.next - Date.now())
+        await showToast(
+          `Slotstream recovering: attempt ${event.properties.status.attempt}/5`,
+          `${event.properties.status.message} | retrying in ${formatDuration(waitMs)}`,
+          Math.max(3000, waitMs + 1000),
+          "warning",
+        )
+        return
+      }
+
       if (event.type === "session.idle") {
         stopPrefill(event.properties.sessionID)
         return
@@ -363,7 +426,79 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
       if (!info.time.completed && !info.error) return
 
       stopPrefill(info.sessionID, agent)
-      if (!info.time.completed || info.error || reported.has(info.id)) return
+      if (info.error) {
+        if (reported.has(info.id)) return
+        reported.add(info.id)
+        timing.delete(info.id)
+        messageAgents.delete(info.id)
+        if (reported.size > 500) reported.clear()
+
+        const runtimeURL = runtimeURLByModel.get(info.modelID)
+        const [runtime, systemMemory] = await Promise.all([
+          runtimeURL
+            ? updateRuntime(info.modelID, runtimeURL).then((value) => value ?? runtimeByModel.get(info.modelID))
+            : Promise.resolve(runtimeByModel.get(info.modelID)),
+          getSystemMemoryStats(),
+        ])
+        const error = errorDetails(info.error)
+        const elapsedMs = Math.max(0, (info.time.completed ?? Date.now()) - info.time.created)
+        const lines = [
+          `${error.code}: ${error.message}`,
+          `failed ${current.firstOutputAt ? "after" : "before"} first output after ${formatDuration(elapsedMs)}`,
+        ]
+        if (runtime) {
+          const plan = []
+          if (runtime.processResidentBytes) plan.push(`process resident ${formatBytes(runtime.processResidentBytes)}`)
+          if (runtime.expectedPeakGB) plan.push(`planned peak ${runtime.expectedPeakGB.toFixed(1)} GB`)
+          if (runtime.expertsCachedPerLayer && runtime.expertsPerLayer) {
+            plan.push(`experts ${runtime.expertsCachedPerLayer}/${runtime.expertsPerLayer}/layer`)
+          }
+          if (plan.length) lines.push(plan.join(" | "))
+          if (runtime.prefixCacheHits !== undefined && runtime.prefixCacheMisses !== undefined) {
+            lines.push(
+              `prefix cache ${runtime.prefixCacheHits} hits, ${runtime.prefixCacheMisses} misses, ${runtime.prefixCacheEvictions ?? 0} evictions | ${(runtime.prefixCacheHeldTokens ?? 0).toLocaleString()} tok held`,
+            )
+          }
+        }
+        const memory = []
+        if (systemMemory.pressure) memory.push(`pressure ${systemMemory.pressure}`)
+        if (systemMemory.availablePercent !== undefined) memory.push(`${systemMemory.availablePercent}% available`)
+        if (systemMemory.swapUsedMB !== undefined) memory.push(`swap ${systemMemory.swapUsedMB.toFixed(0)} MB`)
+        if (memory.length) lines.push(`macOS after failure: ${memory.join(" | ")}`)
+
+        const summary = lines.join("\n")
+        await Promise.allSettled([
+          showToast(`Model failed: ${info.modelID} (${agent})`, summary, COMPLETED_TOAST_MS, "error"),
+          client.app.log({
+            body: {
+              service: "model-stats",
+              level: "error",
+              message: summary.replaceAll("\n", " | "),
+              extra: {
+                sessionID: info.sessionID,
+                messageID: info.id,
+                modelID: info.modelID,
+                agent,
+                errorCode: error.code,
+                errorMessage: error.message,
+                elapsedMs,
+                pressure: systemMemory.pressure ?? null,
+                availableMemoryPercent: systemMemory.availablePercent ?? null,
+                swapUsedMB: systemMemory.swapUsedMB ?? null,
+                processResidentBytes: runtime?.processResidentBytes ?? null,
+                expectedPeakGB: runtime?.expectedPeakGB ?? null,
+                expertsCachedPerLayer: runtime?.expertsCachedPerLayer ?? null,
+                prefixCacheHeldTokens: runtime?.prefixCacheHeldTokens ?? null,
+                prefixCacheHits: runtime?.prefixCacheHits ?? null,
+                prefixCacheMisses: runtime?.prefixCacheMisses ?? null,
+                prefixCacheEvictions: runtime?.prefixCacheEvictions ?? null,
+              },
+            },
+          }),
+        ])
+        return
+      }
+      if (!info.time.completed || reported.has(info.id)) return
 
       reported.add(info.id)
       timing.delete(info.id)

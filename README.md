@@ -16,6 +16,10 @@ for a local Slotstream model.
 - Reads Slotstream's Ollama-compatible `/api/ps` and `/api/show` endpoints for
   process resident memory, device working set, planned peak, expert residency,
   live prefix-cache counters, and planned inference rates.
+- Turns failed requests into persistent diagnostic reports with the provider
+  error, elapsed time, Slotstream plan/cache state, and a post-failure macOS
+  memory-pressure, availability, and swap snapshot.
+- Shows OpenCode's retry attempt and countdown for transient Slotstream errors.
 - Writes the complete structured record to OpenCode's normal log through
   `client.app.log()`.
 
@@ -25,6 +29,17 @@ live prompt count and cache-miss ETA are therefore labeled as estimates; they do
 not claim an exact percentage or account for a cache hit. Slotstream's own
 terminal remains the only source for exact active prefill progress. TTFT and the
 observed prefill rate become available when the first output arrives.
+
+## Automatic recovery
+
+OpenCode 1.18.30 already retries transient provider failures up to five times
+with exponential backoff. Slotstream 0.2.14's streamed memory-pressure message
+does not match OpenCode's retry classification, so the retry loop is not entered.
+
+`patches/slotstream-0.2.14-opencode-retry.patch` fixes that integration contract.
+It advertises automatic retry only when pressure interrupts inference before the
+first model token. Pressure after output begins remains non-retryable, preventing
+duplicate text or tool side effects.
 
 ## Install
 

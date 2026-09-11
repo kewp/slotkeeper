@@ -1,0 +1,23 @@
+--- a/Sources/Slotstream/RequestControl.swift
++++ b/Sources/Slotstream/RequestControl.swift
+@@ -190,14 +190,18 @@ public final class RequestController: @unchecked Sendable {
+         if !connected() { throw fail(RequestFailure(.clientCancelled, "the client disconnected during \(phase)")) }
+         let elapsed = elapsedSeconds
+         let seconds = configuration.maxPrefillWaitMinutes * 60
+-        if seconds > 0, !lock.withLock({ firstToken }), elapsed >= seconds {
++        let waitingForFirstToken = !lock.withLock { firstToken }
++        if seconds > 0, waitingForFirstToken, elapsed >= seconds {
+             var error = RequestFailure(.prefillDeadlineExceeded,
+                 "request-to-first-token deadline exceeded during \(phase); send less context or raise --max-prefill-wait")
+             error.elapsedSeconds = elapsed; error.limitSeconds = seconds
+             throw fail(error)
+         }
+         if pressure() {
+-            throw fail(RequestFailure(.insufficientMemory, "memory pressure interrupted \(phase); retry after memory becomes available"))
++            let recovery = waitingForFirstToken
++                ? "try your request again after memory becomes available"
++                : "retry after memory becomes available"
++            throw fail(RequestFailure(.insufficientMemory, "memory pressure interrupted \(phase); \(recovery)"))
+         }
+         if let pool = lock.withLock({ reservations }) {
+             do {
