@@ -70,14 +70,34 @@ continuous local service. None of them need a Slotstream rebuild.
 scripts/slotstream-ctl.sh status          # process, port owner, plan, cache, pressure, profile mismatch
 scripts/slotstream-ctl.sh start everyday  # 32K window; also: conservative (16K), deep (65K), or a number
 scripts/slotstream-ctl.sh install-agent   # LaunchAgent: restart on crash, log capture
-scripts/monitor.sh 30                     # JSONL samples to ~/.slotstream/metrics/
-scripts/bench.py --label 32k              # TTFT / prefill / decode measurements to metrics/bench.jsonl
+scripts/slotstream-ctl.sh monitor start   # 30 s JSONL samples to ~/.slotstream/metrics/ (LaunchAgent)
+scripts/slotstream-ctl.sh exerciser start # continuous task suite (LaunchAgent); pause/resume/status/report
+scripts/report.py --hours 24              # what the exerciser, bench and monitor recorded
+scripts/bench.py --label 32k              # one-off TTFT / prefill / decode measurements
 scripts/pressure-drill.sh                 # simulated memory pressure during prefill; checks retry wording
 scripts/install-plugin.sh                 # standalone plugin copy (or --link for the repo shim)
 ```
 
 `SlotstreamBar/` is a SwiftUI menu-bar prototype that supervises the server
-through the control script: `cd SlotstreamBar && swift run`.
+through the control script and shows the exerciser's progress with a pause
+button for battery: `cd SlotstreamBar && swift run`.
+
+### Exerciser
+
+`scripts/exerciser.py` runs a rotating suite against the server in the
+background: short chat, code review of a random repo file, three-turn
+conversation (checks prefix reuse), tool call, JSON answer, codebase summaries at
+8K/16K/24K tokens, a 1,500-token generation, an over-window prompt (must be
+refused cleanly), a client cancel mid-prefill (server must recover), and two
+simultaneous requests (queueing). Every run records latency, tokens, server CPU
+and RSS peaks, pressure, battery and the plan before and after, to
+`~/.slotstream/metrics/exerciser.jsonl`.
+
+It yields to real work: it waits while `~/.slotstream/opencode-active` is fresh
+(the plugin writes it during requests), while on battery, while memory pressure
+is critical, and while `~/.slotstream/exerciser.pause` exists (the menu-bar
+Pause button). Point it at more code with `EXERCISER_REPOS=/path/a:/path/b` in
+`~/.slotstream/ctl.env`.
 
 ## Development
 

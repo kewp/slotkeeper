@@ -44,6 +44,16 @@ struct StatusMenu: View {
             Text("Applies on next start. Keep OpenCode's context declaration in sync.").font(.caption)
         }
         Divider()
+        Text(status.exerciserHeadline).font(.headline)
+        if status.exerciser.installed {
+            Text(status.exerciserSummary)
+            ForEach(status.exerciser.last, id: \.self) { Text($0).font(.caption) }
+            Button(status.exerciser.pauseFlag == nil ? "Pause Exerciser (save battery)" : "Resume Exerciser") { status.toggleExerciserPause() }
+            Button("Stop Exerciser") { status.run("exerciser", "stop") }
+        } else {
+            Button("Start Exerciser") { status.run("exerciser", "start") }
+        }
+        Divider()
         Button("Copy Endpoint") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(status.endpoint, forType: .string)
@@ -159,6 +169,69 @@ final class StatusModel: ObservableObject {
         return lines
     }
 
+    // MARK: exerciser
+
+    struct ExerciserState {
+        var installed = false
+        var paused: String?
+        var pauseFlag: String?
+        var runs = 0, ok = 0, fail = 0, cycle = 0
+        var current: String?
+        var currentStarted: Date?
+        var updated: Date?
+        var last: [String] = []
+    }
+    @Published var exerciser = ExerciserState()
+
+    var exerciserHeadline: String {
+        guard exerciser.installed else { return "Exerciser not installed" }
+        if let flag = exerciser.pauseFlag { return "Exerciser paused: \(flag)" }
+        if let cur = exerciser.current {
+            let secs = exerciser.currentStarted.map { Int(Date().timeIntervalSince($0)) } ?? 0
+            return "Exerciser running \(cur) (\(secs)s)"
+        }
+        if let why = exerciser.paused { return "Exerciser waiting: \(why)" }
+        if let upd = exerciser.updated, Date().timeIntervalSince(upd) > 900 { return "Exerciser stale (no update for \(Int(Date().timeIntervalSince(upd) / 60)) min)" }
+        return "Exerciser idle between tasks"
+    }
+
+    var exerciserSummary: String {
+        "cycle \(exerciser.cycle) | \(exerciser.ok) ok, \(exerciser.fail) failed of \(exerciser.runs)"
+    }
+
+    private func readExerciser() -> ExerciserState {
+        var st = ExerciserState()
+        st.installed = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/work.penz.slotstream-exerciser.plist")
+        if let flag = try? String(contentsOf: home.appendingPathComponent("exerciser.pause"), encoding: .utf8) {
+            st.pauseFlag = flag.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let data = try? Data(contentsOf: home.appendingPathComponent("exerciser.state.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return st }
+        let iso = ISO8601DateFormatter()
+        st.runs = obj["runs"] as? Int ?? 0
+        st.ok = obj["ok"] as? Int ?? 0
+        st.fail = obj["fail"] as? Int ?? 0
+        st.cycle = obj["cycle"] as? Int ?? 0
+        st.current = obj["current"] as? String
+        st.paused = obj["paused"] as? String
+        st.currentStarted = (obj["current_started"] as? String).flatMap { iso.date(from: $0) }
+        st.updated = (obj["updated"] as? String).flatMap { iso.date(from: $0) }
+        for item in (obj["last"] as? [[String: Any]] ?? []).prefix(4) {
+            let task = item["task"] as? String ?? "?"
+            let ok = item["ok"] as? Bool ?? false
+            let ttft = (item["ttft_s"] as? Double).map { String(format: "%.1fs", $0) } ?? "–"
+            let dec = (item["decode_tok_s"] as? Double).map { String(format: "%.1f tok/s", $0) } ?? "–"
+            let prompt = (item["prompt_tokens"] as? Int).map { "\($0) tok" } ?? ""
+            let note = (item["note"] as? String ?? "").prefix(40)
+            st.last.append("\(ok ? "✓" : "✗") \(task) \(prompt) TTFT \(ttft) \(dec) \(note)")
+        }
+        return st
+    }
+
+    func toggleExerciserPause() {
+        if exerciser.pauseFlag != nil { run("exerciser", "resume") } else { run("exerciser", "pause", "paused from menu bar") }
+    }
+
     func refresh() {
         Task { [weak self] in
             guard let self else { return }
@@ -169,7 +242,9 @@ final class StatusModel: ObservableObject {
             let (pressure, free) = await systemMemory()
             var plan = PlanSummary()
             if version != nil { plan = await fetchPlan() }
+            let ex = readExerciser()
             await MainActor.run {
+                self.exerciser = ex
                 self.version = version ?? ""
                 self.profileName = (profile?.isEmpty == false) ? profile! : "everyday"
                 self.pressure = pressure
@@ -184,11 +259,10 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    func run(_ command: String, _ arg: String? = nil) {
+    func run(_ command: String, _ extra: String...) {
         Task { [weak self] in
             guard let self else { return }
-            var args = [command]
-            if let arg { args.append(arg) }
+            let args = [command] + extra
             let result = await Shell.run("/bin/bash", [ctlPath] + args, timeout: 240)
             let text = (result.stdout + result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
             await MainActor.run {

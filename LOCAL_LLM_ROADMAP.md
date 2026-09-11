@@ -37,6 +37,14 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 - Ollama remains installed on 11434 and no longer conflicts.
 - Disk free rose from 14 GiB to 82 GiB after cleanup, which makes the
   `pack-experts` contiguous artifact a possible experiment again.
+- Finding 17:09: a stuck kernel pressure level (left behind by a killed
+  `memory_pressure -S`) made Slotstream refuse every request at tokenization
+  with 65% memory free. Slotstream trusts `kern.memorystatus_vm_pressure_level`
+  alone. Real-world analogue: any process that leaves the level elevated takes
+  the server down until it clears. Worth a Slotstream change: cross-check the
+  level against actual availability before refusing, or expose the reading in
+  `/api/show` so the supervisor can flag it. The drill script now lets the
+  simulator time out instead of killing it.
 - Pressure drill run 17:01: simulated critical pressure during prefill produced
   the retryable error and the server-side log line. Retry contract verified.
   Side observation: with OpenCode closed the cache had grown 19 → 43
@@ -291,7 +299,10 @@ Slotstream rebuild and none were applied to the running server.
 | `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
 | `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | run 17:01, contract holds |
 | `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
-| `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle | builds and runs |
+| `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle, exerciser status and pause | builds and runs |
+| `scripts/exerciser.py` | continuous 12-task suite with per-run cost and behaviour checks; yields to OpenCode, battery, pressure, pause flag | LaunchAgent `work.penz.slotstream-exerciser`, started 17:15 |
+| `scripts/report.py` | folds exerciser, bench and monitor data into pass rates, medians, decode-vs-cache, pressure minutes | written |
+| plugin `opencode-active` marker | `model-stats.ts` writes `~/.slotstream/opencode-active` during requests so the exerciser never competes | typechecks; loads on next OpenCode restart |
 
 The plugin still loads through the repo shim on purpose while the plugin
 changes daily. Switch to the copy when it settles.

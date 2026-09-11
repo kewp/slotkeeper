@@ -8,7 +8,7 @@ The home of a larger effort: run a local model (Slotstream serving Qwen3.8-Flash
 
 - `model-stats.ts`: single-file OpenCode plugin with live prefill timing, completion stats, and failure diagnostics.
 - `patches/`: Slotstream source patch making pre-output memory-pressure errors retryable by OpenCode.
-- `scripts/` + `launchd/`: lifecycle control, LaunchAgent, metrics monitor, benchmark, pressure drill, plugin installer. Bash + jq + python3, no build step.
+- `scripts/` + `launchd/`: lifecycle control, LaunchAgents (server, monitor, exerciser), metrics monitor, continuous exerciser, report, benchmark, pressure drill, release installer, plugin installer. Bash + jq + python3, no build step.
 - `SlotstreamBar/`: SwiftUI menu-bar supervisor prototype (`swift build` / `swift run` in that directory; macOS 14+, tools 5.10, `-parse-as-library`). It shells out to `scripts/slotstream-ctl.sh` and never loads the model.
 - `LOCAL_LLM_ROADMAP.md`, `SLOTSTREAM_DEVELOPMENT.md`, `SLOTSTREAM_RECOVERY.md`: the operational reference. Keep them accurate when behavior changes; the roadmap's "Plan Review" and "Tooling Added" sections track what exists versus what is planned.
 
@@ -31,6 +31,8 @@ Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`,
 - `scripts/pressure-drill.sh` and `scripts/bench.py --set long` load the machine; run them only when asked.
 - Server window and OpenCode's `limit.context` for provider `slotstream` must match. `slotstream-ctl.sh status` warns on mismatch. The OpenCode config is JSONC (trailing commas), so do not parse it with `jq`.
 - Profiles: everyday 32768, conservative 16384, deep 65536, persisted in `~/.slotstream/profile`. Port and other knobs live in `~/.slotstream/ctl.env` (currently port 11435; Ollama keeps 11434). All scripts and the app read that file.
+- Three LaunchAgents: `work.penz.slotstream` (server), `-monitor`, `-exerciser`. Manage them only through `scripts/slotstream-ctl.sh`; `launchctl kickstart` hangs in this environment, the script uses bootout/bootstrap. Side-agent scripts must be executable (launchd exits 78 otherwise).
+- "How is it going?" means: run `scripts/report.py` (add `--hours N`), `scripts/slotstream-ctl.sh exerciser status`, and look at recent failures in `~/.slotstream/metrics/exerciser.jsonl`.
 - The server runs under launchd (`work.penz.slotstream`). Use the control script to stop/start; do not `pkill` it, launchd will respawn it after 30 s and `pkill -f "slotstream serve"` also kills any foreground test run.
 - Scripts must stay compatible with `/bin/bash` 3.2 (launchd runs them with it): no `mapfile`, no associative arrays. `lsof` exits 1 on no match, so guard pipelines under `pipefail`.
 - Rebuilding Slotstream: extract `~/.slotstream/bin/build-source.tar.gz.0.2.14.original` (kept in the first release dir), apply the repo patch, copy `~/.slotstream/bin/mlx.metallib` to `Tools/lib/mlx-0.31.1.metallib`, then `make checks && make build` (about 5 minutes). Install with `scripts/install-release.sh`.

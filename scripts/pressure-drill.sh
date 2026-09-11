@@ -34,13 +34,14 @@ python3 "$DIR/bench.py" --set medium --label "pressure-drill-$LEVEL" > "$OUT" 2>
 bench_pid=$!
 sleep "$DELAY"
 
-if [[ $(id -u) -eq 0 ]]; then sim=(memory_pressure -S -l "$LEVEL"); else sim=(sudo memory_pressure -S -l "$LEVEL"); fi
-echo "drill: ${sim[*]} for 10s"
-"${sim[@]}" >/dev/null 2>&1 &
-sim_pid=$!
-sleep 10
-kill "$sim_pid" 2>/dev/null; sudo kill "$sim_pid" 2>/dev/null || true
+# -s makes the simulator reset the level itself when the duration ends. Never kill it early:
+# a killed simulator leaves kern.memorystatus_vm_pressure_level stuck at the simulated value
+# (recover with: sudo memory_pressure -S -l warn -s 1).
+if [[ $(id -u) -eq 0 ]]; then sim=(memory_pressure -S -l "$LEVEL" -s 10); else sim=(sudo memory_pressure -S -l "$LEVEL" -s 10); fi
+echo "drill: ${sim[*]}"
+"${sim[@]}" >/dev/null 2>&1
 wait "$bench_pid" 2>/dev/null
+echo "drill: kernel pressure level now $(sysctl -n kern.memorystatus_vm_pressure_level) (1 = normal)"
 
 echo
 echo "== bench result"

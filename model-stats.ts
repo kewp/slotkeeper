@@ -1,9 +1,27 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import type { Part } from "@opencode-ai/sdk"
+import { mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 
 const PROVIDER_ID = "slotstream"
 const COMPLETED_TOAST_MS = 24 * 60 * 60 * 1000
 const PREFILL_REFRESH_MS = 15 * 1000
+// Marker the background exerciser watches so it never competes with a real request.
+const ACTIVE_MARKER = join(homedir(), ".slotstream", "opencode-active")
+
+function markActive(sessionID: string, agent: string) {
+  try {
+    mkdirSync(join(homedir(), ".slotstream"), { recursive: true })
+    writeFileSync(ACTIVE_MARKER, JSON.stringify({ sessionID, agent, startedAt: Date.now() }))
+  } catch {}
+}
+
+function clearActive() {
+  try {
+    rmSync(ACTIVE_MARKER, { force: true })
+  } catch {}
+}
 
 type Timing = {
   firstOutputAt?: number
@@ -365,6 +383,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
       const runtimeURL = getRuntimeURL(baseURL)
       contextByModel.set(input.model.id, input.model.limit.context)
       if (runtimeURL) runtimeURLByModel.set(input.model.id, runtimeURL)
+      markActive(input.sessionID, input.agent)
       startPrefill(input.sessionID, input.agent, input.model.id, input.model.limit.context, runtimeURL)
       const key = requestKey(input.sessionID, input.agent)
       void estimatePromptTokens(input.sessionID, input.agent).then((estimatedPromptTokens) => {
@@ -394,6 +413,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
 
       if (event.type === "session.idle") {
         stopPrefill(event.properties.sessionID)
+        if (inFlight.size === 0) clearActive()
         return
       }
 
@@ -426,6 +446,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
       if (!info.time.completed && !info.error) return
 
       stopPrefill(info.sessionID, agent)
+      if (inFlight.size === 0) clearActive()
       if (info.error) {
         if (reported.has(info.id)) return
         reported.add(info.id)

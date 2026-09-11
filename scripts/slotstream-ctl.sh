@@ -16,6 +16,9 @@
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
+#   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (work.penz.slotstream-monitor).
+#   exerciser <start|stop|pause [reason]|resume|status|report>
+#                       Background task suite as a LaunchAgent (work.penz.slotstream-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
 #
@@ -275,6 +278,67 @@ cmd_uninstall_agent() {
   log "removed LaunchAgent (server, if running, was stopped)"
 }
 
+agent_installed() { launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1; }
+
+install_side_agent() {
+  # $1 label, $2 program (absolute), $3 log file
+  local label="$1" program="$2" logfile="$3" plist="$HOME/Library/LaunchAgents/$1.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$program</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>$logfile</string>
+  <key>StandardErrorPath</key><string>$logfile</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>$HOME</string>
+    <key>PATH</key><string>/Library/Frameworks/Python.framework/Versions/3.13/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+</dict></plist>
+PLIST
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  log "installed and started $label"
+}
+
+remove_side_agent() {
+  launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$1.plist"
+  log "stopped and removed $1"
+}
+
+cmd_monitor() {
+  local label="work.penz.slotstream-monitor"
+  case "${1:-status}" in
+    start) pkill -f "scripts/monitor.sh" 2>/dev/null || true; install_side_agent "$label" "$SCRIPT_DIR/monitor.sh" "$SLOTSTREAM_HOME/monitor.log" ;;
+    stop) remove_side_agent "$label" ;;
+    status) echo "monitor: $(agent_installed "$label" && echo "launchd" || echo "not installed") $(pgrep -f 'scripts/monitor.sh' | head -1 | sed 's/^/pid /')"; tail -n 1 "$SLOTSTREAM_HOME"/metrics/"$(date +%Y-%m-%d)".jsonl 2>/dev/null | jq -c '{ts, pressure, free_percent, disk_free_gb, experts: .slotstream.experts_per_layer}' ;;
+    *) die "monitor start|stop|status" ;;
+  esac
+}
+
+cmd_exerciser() {
+  local label="work.penz.slotstream-exerciser" pause="$SLOTSTREAM_HOME/exerciser.pause" state="$SLOTSTREAM_HOME/exerciser.state.json"
+  case "${1:-status}" in
+    start) rm -f "$pause"; install_side_agent "$label" "$SCRIPT_DIR/exerciser.py" "$SLOTSTREAM_HOME/exerciser.log" ;;
+    stop) remove_side_agent "$label" ;;
+    pause) echo "${2:-paused by user}" > "$pause"; log "exerciser paused (${2:-paused by user}); finishes the current task first" ;;
+    resume) rm -f "$pause"; log "exerciser resumed" ;;
+    status)
+      echo "exerciser: $(agent_installed "$label" && echo "launchd" || echo "not installed")$([[ -f "$pause" ]] && echo "  PAUSED: $(cat "$pause")")"
+      [[ -f "$state" ]] && jq -r '"  runs \(.runs) ok \(.ok) fail \(.fail) cycle \(.cycle) | current \(.current // "idle") | paused \(.paused // "no") | updated \(.updated)", (.last[:3][] | "  \(.ts) \(.task) \(if .ok then "ok" else "FAIL" end) \(.note) ttft \(.ttft_s) decode \(.decode_tok_s)")' "$state" ;;
+    report) python3 "$SCRIPT_DIR/report.py" "${@:2}" ;;
+    *) die "exerciser start|stop|pause [reason]|resume|status|report" ;;
+  esac
+}
+
 case "${1:-}" in
   start) cmd_start "${2:-}" ;;
   run) cmd_run "${2:-}" ;;
@@ -289,5 +353,7 @@ case "${1:-}" in
   bundle) cmd_bundle ;;
   install-agent) cmd_install_agent ;;
   uninstall-agent) cmd_uninstall_agent ;;
+  monitor) cmd_monitor "${2:-status}" ;;
+  exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
   *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
