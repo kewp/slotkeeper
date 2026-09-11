@@ -570,9 +570,17 @@ def main():
             if stop or not wait_while_paused():
                 break
             run_task(name)
-            for _ in range(int(args.gap)):
+            # Rest between tasks, but keep the published state honest: re-evaluate the
+            # yield rules every few seconds so the app shows "waiting: OpenCode active"
+            # as soon as a real request starts, not only when the next task is due.
+            for i in range(int(args.gap)):
                 if stop:
                     break
+                if i % 5 == 0:
+                    reason = pause_reason()
+                    if reason != state["paused"]:
+                        state["paused"] = reason
+                        write_state()
                 time.sleep(1)
         if args.once:
             break
