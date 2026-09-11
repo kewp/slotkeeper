@@ -100,9 +100,8 @@ OpenCode's retry loop does not recognise, it trusts the OS pressure level
 alone, which can stay elevated after the pressure is gone, and it retains
 only a tenth of the pool budget as conversation state, so on a small Mac a
 long coding session re-prefills its whole history every turn. Three patches
-against 0.2.14 source fix that; the first two pass Slotstream's own T0 check
-suite plus new checks, the third (prefix retention, `--prefix-cache-tokens
-full`) is written but not yet built. None is needed for anything else here.
+against 0.2.14 source fix that; all three pass Slotstream's own T0 check
+suite plus new checks. None is needed for anything else here.
 One command does it, about five minutes with Xcode or the Command Line Tools
 installed:
 

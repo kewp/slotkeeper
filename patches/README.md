@@ -3,10 +3,9 @@
 Three patches against [Slotstream](https://github.com/carloslfu/slotstream)
 0.2.14 source. Apply in this order (alphabetical, which is what
 `scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
-candidate for an upstream pull request. The first two pass Slotstream's T0
-check suite (`make checks`) with the new checks included; the third was
-written on 2026-09-11 and has not been built yet (see the status line at
-the bottom of this file).
+candidate for an upstream pull request. All three pass Slotstream's T0
+check suite (`make checks`, 34 checks, 25,425 assertions) with the new
+checks included.
 
 | Patch | What it changes | New check |
 | --- | --- | --- |
@@ -158,9 +157,17 @@ be at most half of turn-1) is the qualification.
 
 ## Status
 
-2026-09-11 evening: the prefix-retention patch is written and dry-applies to
-the patched source tree, but has not been compiled or run through `make
-checks` because the machine was busy with the context sweep and an OpenCode
-session. Next: `scripts/slotkeeper patch --build-only` when the Mac is
-free, then install, set `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in
-`~/.slotstream/ctl.env`, restart, and run `multi-turn-long`.
+2026-09-11 19:22: all three patches built, checked and installed as release
+`slotstream-0.2.14-local-20260911192148`; `SLOTSTREAM_PREFIX_CACHE_TOKENS=full`
+is in `~/.slotstream/ctl.env`. First plan after restart: 43 experts/layer,
+5.7 GB pool, `prefix_cache_max_tokens` 32768 (was 11940). `/api/show`
+reports `runtime_prefix_cache_tokens: 65536`, the raw `full` setting; the
+plan caps it at the window. The `multi-turn-long` qualification has not run
+yet; the exerciser was restarted to pick it up.
+
+Build trap: after adding a stored field to `RuntimeAllocationPolicy`, an
+incremental `swift build` left `SlotstreamTestKit` compiled against the old
+layout of `GovernorPolicy.Inputs`, and `openai-context-budget` failed with a
+nonsense reason (`memory pressure (warning)` from a nil field). Cleaning
+`.build/arm64-apple-macosx/debug` and rebuilding fixed it. `scripts/slotkeeper
+patch` always starts from a clean tree, so it does not hit this.

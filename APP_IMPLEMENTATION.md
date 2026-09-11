@@ -299,11 +299,13 @@ replaces log parsing with this; the plugin replaces its ETA estimate with
 
 ### C2. Full-window prefix retention (Slotstream, est. 2 to 4 days)
 
-Status 2026-09-11: written as `patches/slotstream-0.2.14-prefix-retention.patch`
-(steps 1 to 4 below, carried on `RuntimeAllocationPolicy.prefixCacheTokens`
-rather than a new planner parameter, so it flows through the governor for
-free) plus the `multi-turn-long` exerciser task (step 5). Not yet compiled
-or checked; see `patches/README.md` Status.
+Status 2026-09-11 19:22: done and installed as
+`patches/slotstream-0.2.14-prefix-retention.patch` (steps 1 to 4 below,
+carried on `RuntimeAllocationPolicy.prefixCacheTokens` rather than a new
+planner parameter, so it flows through the governor for free) plus the
+`multi-turn-long` exerciser task (step 5). Checks pass; the live plan holds
+32768 tokens. Qualification with `multi-turn-long` still pending; see
+`patches/README.md` Status.
 
 Today `Planner.prefixCacheTokensFor(poolBudgetGB:contextCap:)` in
 `Sources/Slotstream/Plan.swift` (line ~485) returns 10% of the pool budget

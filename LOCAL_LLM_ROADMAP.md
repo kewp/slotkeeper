@@ -19,18 +19,18 @@ reasoning; this is the state.
 - Done today: 32K switch, port move, patched builds ×3, retry contract and
   stale-pressure fix verified, exerciser and sweep mode, dashboard, live
   active-request stats, `slotkeeper patch` one-command rebuild, hand-off docs.
-- Evening: the context sweep on everyday is running (Karl started it).
-  Full-window prefix retention (C2) is written: third patch
-  `patches/slotstream-0.2.14-prefix-retention.patch`, knob
-  `SLOTSTREAM_PREFIX_CACHE_TOKENS=full`, exerciser task `multi-turn-long`.
-  Not built: a Swift build loads every core while the sweep and an OpenCode
-  session were using the model.
-- Next, in order: (1) when the Mac is free, `scripts/slotkeeper patch
-  --build-only`, fix whatever the compiler and `make checks` say, install,
-  set `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in `~/.slotstream/ctl.env`,
-  restart, restart the exerciser so it picks up `multi-turn-long`, and
-  compare turn-2 TTFT before and after; (2) read the sweep with
-  `scripts/report.py`, then run it on deep; (3) app Stage A
+- 19:22: full-window prefix retention (C2) built, checked and installed
+  (third patch `patches/slotstream-0.2.14-prefix-retention.patch`,
+  `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in ctl.env, release
+  `slotstream-0.2.14-local-20260911192148`). Plan after restart: 43/layer,
+  5.7 GB pool, 32768 tokens retained (was 11940). Exerciser restarted with
+  the new `multi-turn-long` task. The debug build at 19:12 interrupted a
+  17.7K-token prefill on the live server with a pressure failure; the
+  everyday sweep Karl started earlier may be missing that point.
+- Next, in order: (1) read `multi-turn-long` rows as they arrive
+  (`scripts/report.py`): turn-2 TTFT must be at most half of turn-1, and
+  `slotkeeper status` should show hits climbing; (2) read the sweep, rerun
+  any missing sizes, then run it on deep; (3) app Stage A
   (`APP_IMPLEMENTATION.md`); (4) upstream the three patches
   (`patches/README.md` has the PR text).
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
