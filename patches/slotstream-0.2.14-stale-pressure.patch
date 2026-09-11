@@ -1,0 +1,129 @@
+diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/Slotstream/Engine.swift src-patched/Sources/Slotstream/Engine.swift
+--- a/Sources/Slotstream/Engine.swift	2026-09-11 17:31:53
++++ b/Sources/Slotstream/Engine.swift	2026-09-11 17:31:54
+@@ -148,7 +148,14 @@
+             slackBytes: Int(Planner.availabilitySlackGB(ramGB: currentPlan?.ramGB ?? Planner.deviceRAMGB()) * 1e9),
+             connected: connected, pressure: { [weak self] in
+                 guard let self else { return true }
+-                return self.pressureBoundary.snapshot() != nil || self.osPressureLock.withLock { self.osPressure }
++                if self.pressureBoundary.snapshot() != nil { return true }
++                let latched = self.osPressureLock.withLock { self.osPressure }
++                guard latched else { return false }
++                let available = Planner.deviceAvailableGB()
++                let refuse = RequestPressurePolicy.refuses(
++                    osPressure: true, availableGB: available, ramGB: self.currentPlan?.ramGB ?? Planner.deviceRAMGB())
++                if !refuse { self.noteStalePressure(availableGB: available) }
++                return refuse
+             })
+         try control.attachReservations(requestReservations)
+         return control
+@@ -180,6 +187,21 @@
+ 
+     private let osPressureLock = NSLock()
+     private var osPressure = false
++    private var stalePressureLoggedAt: Date?
++
++    /// Logs (at most once a minute) that a latched OS pressure level was
++    /// overridden by reclaimable memory, so the operator can see the OS signal
++    /// and the engine's reading disagree.
++    private func noteStalePressure(availableGB: Double?) {
++        let shouldLog = osPressureLock.withLock { () -> Bool in
++            if let at = stalePressureLoggedAt, -at.timeIntervalSinceNow < 60 { return false }
++            stalePressureLoggedAt = Date(); return true
++        }
++        guard shouldLog else { return }
++        let gb = availableGB.map { String(format: "%.1f", $0) } ?? "?"
++        FileHandle.standardError.write(
++            "memory pressure: OS level still elevated but \(gb) GB reclaimable; treating it as stale and admitting requests\n".data(using: .utf8)!)
++    }
+     private var pressureMonitor: DispatchSourceMemoryPressure?
+ 
+     /// Retained conversation state, so a follow-up turn re-prefills only what
+diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/Slotstream/RequestPressurePolicy.swift src-patched/Sources/Slotstream/RequestPressurePolicy.swift
+--- a/Sources/Slotstream/RequestPressurePolicy.swift	1970-01-01 01:00:00
++++ b/Sources/Slotstream/RequestPressurePolicy.swift	2026-09-11 17:31:54
+@@ -0,0 +1,32 @@
++import Foundation
++
++/// Request admission under an OS memory-pressure signal.
++///
++/// The Dispatch memory-pressure source is a latch: it reports the level at
++/// the last transition and says nothing until the next one. A level that
++/// stays elevated after the condition has passed — a `memory_pressure -S`
++/// simulator killed before it reset, or a missed "normal" event — would make
++/// the engine refuse every request indefinitely on an idle machine with most
++/// of its memory free.
++///
++/// Reclaimable memory is the cross-check. `Planner.deviceAvailableGB()` counts
++/// only pages that can be taken without compressing or swapping anyone else
++/// (free + purgeable + file cache). Real pressure — compressor and swap strain
++/// from system-wide overcommit — leaves little of that, so the check does not
++/// override it. A latched level alongside generous reclaimable memory is
++/// stale and the request proceeds.
++public enum RequestPressurePolicy {
++    /// Reclaimable memory at or above which a latched OS pressure level is
++    /// treated as stale: a quarter of RAM, never below 6 GB.
++    public static func staleThresholdGB(ramGB: Double) -> Double {
++        max(6.0, 0.25 * ramGB)
++    }
++
++    /// Whether a request should be refused for memory pressure.
++    /// `availableGB == nil` (the mach call failed) fails closed.
++    public static func refuses(osPressure: Bool, availableGB: Double?, ramGB: Double) -> Bool {
++        guard osPressure else { return false }
++        guard let availableGB, availableGB.isFinite else { return true }
++        return availableGB < staleThresholdGB(ramGB: ramGB)
++    }
++}
+diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/SlotstreamDiagnostics/Diagnostics+RequestPressure.swift src-patched/Sources/SlotstreamDiagnostics/Diagnostics+RequestPressure.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+RequestPressure.swift	1970-01-01 01:00:00
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+RequestPressure.swift	2026-09-11 17:31:54
+@@ -0,0 +1,37 @@
++// Request admission under a latched OS pressure level, driven through every
++// branch with scripted inputs. The policy is pure, so a stale latch, a real
++// pressure episode, a failed availability read and the threshold's scaling are
++// all reachable without putting a machine under memory pressure.
++
++import Foundation
++import Slotstream
++
++extension Diagnostics {
++    public static func requestPressurePolicy() -> CheckReport {
++        typealias P = RequestPressurePolicy
++        var c = CheckBuilder("request-pressure-policy")
++
++        c.expect("no OS pressure admits regardless of availability",
++                 !P.refuses(osPressure: false, availableGB: 0.1, ramGB: 25.8)
++                 && !P.refuses(osPressure: false, availableGB: nil, ramGB: 25.8))
++        c.expect("OS pressure with unreadable availability fails closed",
++                 P.refuses(osPressure: true, availableGB: nil, ramGB: 25.8))
++        c.expect("OS pressure with non-finite availability fails closed",
++                 P.refuses(osPressure: true, availableGB: .infinity, ramGB: 25.8)
++                 && P.refuses(osPressure: true, availableGB: .nan, ramGB: 25.8))
++        c.expect("real pressure: little reclaimable memory still refuses",
++                 P.refuses(osPressure: true, availableGB: 2.0, ramGB: 25.8))
++        c.expect("stale latch: generous reclaimable memory admits",
++                 !P.refuses(osPressure: true, availableGB: 11.3, ramGB: 25.8),
++                 "the 2026-09-11 stuck-simulator case: 11.3 GB reclaimable on a 25.8 GB Mac")
++        c.expect("threshold floor is 6 GB on small machines",
++                 P.staleThresholdGB(ramGB: 16) == 6.0 && P.staleThresholdGB(ramGB: 8) == 6.0)
++        c.expect("threshold scales to a quarter of RAM on large machines",
++                 P.staleThresholdGB(ramGB: 64) == 16.0 && P.staleThresholdGB(ramGB: 128) == 32.0)
++        let edge = P.staleThresholdGB(ramGB: 25.8)
++        c.expect("exactly at the threshold admits, just below refuses",
++                 !P.refuses(osPressure: true, availableGB: edge, ramGB: 25.8)
++                 && P.refuses(osPressure: true, availableGB: edge - 0.01, ramGB: 25.8))
++        return c.report()
++    }
++}
+diff -ruN -x .build -x lib -x *.orig src-patched-before/Sources/SlotstreamTestKit/T0Checks.swift src-patched/Sources/SlotstreamTestKit/T0Checks.swift
+--- a/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-11 17:31:53
++++ b/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-11 17:31:54
+@@ -22,6 +22,7 @@
+             Check("runtime-check", tier: .t0) { try Diagnostics.runtime() },
+             Check("prefix-client-capacity", tier: .t0) { try Diagnostics.optimizationPrefixCapacity() },
+             Check("governor-check", tier: .t0) { Diagnostics.governorPolicy() },
++            Check("request-pressure-policy", tier: .t0) { Diagnostics.requestPressurePolicy() },
+             Check("pull-check", tier: .t0) { try Diagnostics.pullIntegrity() },
+             Check("machine-planning", tier: .t0) { try Diagnostics.machinePlanning() },
+             Check("http-framing", tier: .t0) { Diagnostics.httpFraming() },

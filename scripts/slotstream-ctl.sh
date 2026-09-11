@@ -16,6 +16,7 @@
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
+#   bar <install|uninstall|restart|status> Menu-bar app at login (work.penz.slotstreambar); builds it first.
 #   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (work.penz.slotstream-monitor).
 #   exerciser <start|stop|pause [reason]|resume|status|report>
 #                       Background task suite as a LaunchAgent (work.penz.slotstream-exerciser).
@@ -152,10 +153,13 @@ cmd_run() {
 
 cmd_start() {
   local context; context="$(resolve_profile "${1:-}")"
-  if launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
+  if [[ -f "$AGENT_PLIST" ]]; then
     log "LaunchAgent is installed; starting through launchd"
-    echo "$context" > "$PROFILE_FILE"
-    launchctl kickstart "gui/$(id -u)/$AGENT_LABEL"
+    [[ -n "${1:-}" ]] && echo "$1" > "$PROFILE_FILE"
+    check_port; check_disk; rotate_log
+    warn_profile_mismatch "$context"
+    launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
   else
     [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
     check_port; check_disk; rotate_log
@@ -171,11 +175,12 @@ cmd_start() {
 cmd_stop() {
   local pids; pids="$(server_pids)"
   if launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
-    # Stop without triggering KeepAlive restart: unload, then reload disabled state is fiddly; use kill and rely on SuccessfulExit=false.
-    launchctl kill SIGTERM "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+    # Unload the job so KeepAlive cannot respawn it; `start` bootstraps it again. launchd sends
+    # SIGTERM and waits ExitTimeOut before SIGKILL.
+    log "unloading $AGENT_LABEL from launchd (server gets SIGTERM)"
+    launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
   fi
   [[ -z "$pids" ]] && { log "not running"; rm -f "$PID_FILE"; return 0; }
-  log "sending SIGTERM to $pids"
   kill -TERM $pids 2>/dev/null || true
   local i
   for i in $(seq 1 30); do
@@ -220,7 +225,7 @@ cmd_status() {
     echo "health:   not ready"
   fi
   echo "profile:  $(cat "$PROFILE_FILE" 2>/dev/null || echo "everyday (default)")  port: $SLOTSTREAM_PORT  env: $([[ -f "$SLOTSTREAM_HOME/ctl.env" ]] && tr '\n' ' ' < "$SLOTSTREAM_HOME/ctl.env" || echo none)"
-  echo "agent:    $(launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1 && echo installed || echo "not installed")"
+  echo "agent:    $([[ -f "$AGENT_PLIST" ]] && { launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1 && echo "installed, loaded" || echo "installed, unloaded (stopped)"; } || echo "not installed")"
   echo "pressure: $(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null | sed 's/^1$/normal/;s/^2$/warning/;s/^4$/critical/')  swap: $(sysctl -n vm.swapusage | sed -E 's/.*used = ([^ ]+).*/\1/')  disk free: $(df -h "$SLOTSTREAM_HOME" | awk 'NR==2{print $4}')"
 }
 
@@ -299,8 +304,8 @@ install_side_agent() {
     <key>HOME</key><string>$HOME</string>
     <key>PATH</key><string>/Library/Frameworks/Python.framework/Versions/3.13/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>ProcessType</key><string>Background</string>
-  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>${SIDE_AGENT_TYPE:-Background}</string>
+  <key>Nice</key><integer>${SIDE_AGENT_NICE:-10}</integer>
 </dict></plist>
 PLIST
   if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then sleep 2; fi   # let the old instance exit before reloading
@@ -312,6 +317,23 @@ remove_side_agent() {
   launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || true
   rm -f "$HOME/Library/LaunchAgents/$1.plist"
   log "stopped and removed $1"
+}
+
+cmd_bar() {
+  local label="work.penz.slotstreambar" pkg="$SCRIPT_DIR/../SlotstreamBar" bin
+  case "${1:-status}" in
+    install|restart)
+      log "building SlotstreamBar (release)"
+      (cd "$pkg" && swift build -c release 2>&1 | tail -1)
+      bin="$(cd "$pkg" && swift build -c release --show-bin-path)/SlotstreamBar"
+      [[ -x "$bin" ]] || die "build did not produce $bin"
+      pkill -x SlotstreamBar 2>/dev/null || true
+      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotstreambar.log"
+      ;;
+    uninstall) remove_side_agent "$label"; pkill -x SlotstreamBar 2>/dev/null || true ;;
+    status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x SlotstreamBar | head -1 | sed 's/^/pid /')" ;;
+    *) die "bar install|uninstall|restart|status" ;;
+  esac
 }
 
 cmd_monitor() {
@@ -353,6 +375,7 @@ case "${1:-}" in
   bundle) cmd_bundle ;;
   install-agent) cmd_install_agent ;;
   uninstall-agent) cmd_uninstall_agent ;;
+  bar) cmd_bar "${2:-status}" ;;
   monitor) cmd_monitor "${2:-status}" ;;
   exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
   *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

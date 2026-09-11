@@ -15,6 +15,16 @@ The implementation has two parts:
 - `patches/slotstream-0.2.14-opencode-retry.patch` adjusts Slotstream's failure
   wording so OpenCode recognizes safe failures as transient, adds regression
   assertions, and logs server-side request failures to standard error.
+- `patches/slotstream-0.2.14-stale-pressure.patch` (applied after the first)
+  stops a latched OS pressure level from refusing requests when reclaimable
+  memory is plentiful. The request path used to trust the Dispatch
+  memory-pressure source alone, which only reports transitions; a level left
+  elevated (a killed `memory_pressure -S`, a missed "normal" event) refused
+  every request indefinitely with most of RAM free. `RequestPressurePolicy`
+  admits a request when reclaimable memory is at or above a quarter of RAM
+  (never below 6 GB), logs the disagreement once a minute, and fails closed
+  when availability cannot be read. Real pressure leaves little reclaimable
+  memory, so it still refuses. The governor's own resize logic is unchanged.
 
 ## Runtime Configuration
 
@@ -88,30 +98,29 @@ survives after a toast is replaced.
 
 ## Installed Build Snapshot
 
-Installed 2026-09-11 16:50 CEST from stock 0.2.14 source plus the full repo
-patch (`patches/slotstream-0.2.14-opencode-retry.patch`), built with
-`make checks && make build` (Xcode 26.4.1, Swift 6.3.1). T0: `33 passed, 0
-failed, 0 skipped (25402 assertions)`. The health endpoint returned
-`{"version":"0.2.14"}` and the plan at startup was 19 experts/layer, 2.5 GB
-pool, 8.8 GB expected peak on a 32K window.
+Installed 2026-09-11 17:35 CEST from stock 0.2.14 source plus both repo patches
+(`patches/slotstream-0.2.14-opencode-retry.patch`, then
+`patches/slotstream-0.2.14-stale-pressure.patch`), built with
+`make checks && make build` (Xcode 26.4.1, Swift 6.3.1). T0: `34 passed, 0
+failed, 0 skipped (25410 assertions)`, including the new
+`request-pressure-policy` check. Startup plan on the 32K window: 30
+experts/layer, 4 GB pool, 10.9 GB expected peak.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `slotstream` | `b10991506821052b57bdc019418cca0e3293db8e7118c015c6a9929063ff169d` |
+| `slotstream` | `bcdbeaac485bcce68f1b35af66e251a6ec90bd37755b3073b99fa862d9b3877b` |
 | `mlx.metallib` | `198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597` |
-| `build-identity.json` | `c6c90f071e8210e6960c76ddf728809febc06fffbf5f455c3da580227566db23` |
-| `build-source.tar.gz` | `a40bbdd9d012db9e106614bbf3dfc63383ae8b15ad44fcc6554391ebd09ea483` |
 
 ```text
-~/.slotstream/bin -> releases/slotstream-0.2.14-local-20260911165001
+~/.slotstream/bin -> releases/slotstream-0.2.14-local-20260911173510
 ```
 
 Previous releases stay under `~/.slotstream/releases/` for rollback:
 
-- `2fd5bfab8073b29095148274b0e5857a43dc20bc530bcacb4c9180ccc5ac2b52-macos26`:
-  the earlier partial-patch build (`slotstream` sha
-  `78c14d82…8cce9`), with the stock 0.2.14 files kept beside it as
-  `*.0.2.14.original`.
+- `slotstream-0.2.14-local-20260911165001`: retry patch only (`slotstream` sha
+  `b1099150…9d3877b`... see git history for the full value).
+- `2fd5bfab…-macos26`: the earlier partial-patch build, with the stock 0.2.14
+  files kept beside it as `*.0.2.14.original`.
 
 Roll back with `scripts/install-release.sh --rollback <release-dir>` followed by
 `scripts/slotstream-ctl.sh restart`.
@@ -174,8 +183,11 @@ Apply the patch only to a stock Slotstream 0.2.14 source tree. Check the actual
 target first and refuse an already-applied or reversed patch:
 
 ```sh
-patch --dry-run --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
-patch --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-stale-pressure; do
+  patch --dry-run --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/$p.patch
+  patch --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/$p.patch
+done
+cp ~/.slotstream/bin/mlx.metallib Tools/lib/mlx-0.31.1.metallib   # the archive omits the 131 MB metallib
 make checks
 make build
 ```

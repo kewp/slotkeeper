@@ -37,6 +37,11 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 - Ollama remains installed on 11434 and no longer conflicts.
 - Disk free rose from 14 GiB to 82 GiB after cleanup, which makes the
   `pack-experts` contiguous artifact a possible experiment again.
+- Fixed 17:35 by `patches/slotstream-0.2.14-stale-pressure.patch` (installed):
+  the request path now cross-checks reclaimable memory before refusing on a
+  latched OS pressure level. Still to verify live with a long simulated
+  critical level (`sudo memory_pressure -S -l critical -s 90`) while sending a
+  request.
 - Finding 17:09: a stuck kernel pressure level (left behind by a killed
   `memory_pressure -S`) made Slotstream refuse every request at tokenization
   with 65% memory free. Slotstream trusts `kern.memorystatus_vm_pressure_level`
@@ -302,6 +307,7 @@ Slotstream rebuild and none were applied to the running server.
 | `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle, exerciser status and pause | builds and runs |
 | `scripts/exerciser.py` | continuous 12-task suite with per-run cost and behaviour checks; yields to OpenCode, battery, pressure, pause flag | LaunchAgent `work.penz.slotstream-exerciser`, started 17:15 |
 | `scripts/report.py` | folds exerciser, bench and monitor data into pass rates, medians, decode-vs-cache, pressure minutes | written |
+| `slotstream-ctl.sh bar install` | menu-bar app built in release and registered as LaunchAgent `work.penz.slotstreambar` (loads at login) | installed 17:32 |
 | plugin `opencode-active` marker | `model-stats.ts` writes `~/.slotstream/opencode-active` during requests so the exerciser never competes | typechecks; loads on next OpenCode restart |
 
 The plugin still loads through the repo shim on purpose while the plugin
