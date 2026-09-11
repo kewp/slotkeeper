@@ -2,6 +2,32 @@
 
 Last updated: 2026-09-11 (plan review and tooling added)
 
+## Where things stand (2026-09-11, end of day)
+
+Read this first after a context reset. Everything below it is history and
+reasoning; this is the state.
+
+- Project renamed to Slotkeeper, repo at `~/slotkeeper`, remote
+  `github.com/kewp/slotkeeper` (GitHub rename and push pending at time of
+  writing). Public-ready: `scripts/setup.sh`, newcomer README, no personal
+  paths, neutral LaunchAgent labels `local.slotkeeper*`.
+- Server: Slotstream 0.2.14 with both patches, 32K everyday profile, port
+  11435, launchd, `caffeinate -s` on AC. Both patches verified live.
+- Running services: server, monitor (30 s), exerciser (12 tasks, 90 s gap),
+  menu-bar app with dashboard window. All survive reboot.
+- Data: `~/.slotstream/metrics/`. Ask "how is it going" → `scripts/report.py`.
+- Done today: 32K switch, port move, patched builds ×3, retry contract and
+  stale-pressure fix verified, exerciser and sweep mode, dashboard, live
+  active-request stats, `slotkeeper patch` one-command rebuild, hand-off docs.
+- Next, in order: (1) context sweep on everyday then deep, (2) full-window
+  prefix retention in Slotstream (`APP_IMPLEMENTATION.md` C2), (3)
+  `small_model` in OpenCode once Karl names a cheap model, (4) app Stage A
+  (`APP_IMPLEMENTATION.md`), (5) upstream the two patches
+  (`patches/README.md` has the PR text).
+- Karl's preferences: slow is fine, evening/overnight runs are expected, the
+  Mac must stay usable, a cheaper model may continue the work (hence the
+  hand-off docs).
+
 ## Goal
 
 Run a useful local model continuously while the Mac remains responsive for
@@ -54,8 +80,11 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
   Side observation: with OpenCode closed the cache had grown 19 → 43
   experts/layer, then fell to 13 under simulated pressure and had not regrown
   minutes later. Watch the monitor series for regrowth behaviour.
-- Not yet done: the `caffeinate` request-scoped sleep assertion, `small_model`
-  for OpenCode title generation, a warm-cache re-benchmark.
+- Done later the same day: `caffeinate -s` held by the server on AC (idle
+  sleep no longer cuts an evening task), deep profile without a prefill
+  deadline, OpenCode context synced on every start.
+- Not yet done: `small_model` for OpenCode title generation (needs Karl to
+  name a cheap model), a warm-cache re-benchmark, the context sweep.
 
 ## Plugin Deployment
 
@@ -282,9 +311,10 @@ did surface facts the plans do not yet account for:
   kernel report a level without allocating. Slotstream reacts to the OS
   notification, so the untested retry path can be exercised on demand with
   `scripts/pressure-drill.sh`.
-- **Title generation hits the local model.** OpenCode's `title` agent sends a
-  request after each turn, competing for the single-flight gate and triggering a
-  prefill. Point OpenCode's `small_model` at a cheaper provider (or a cloud
+- **Title generation hits the local model.** After the first message in a
+  session OpenCode asks the model for a short session name using a separate
+  `title` agent. It is cosmetic (it labels the session list) but costs a full
+  request and prefill on this server, competing for the single-flight gate. Point OpenCode's `small_model` at a cheaper provider (or a cloud
   model) so the local server only serves real work.
 - The expanded patch (25,402 T0 assertions) is now installed (16:50).
 
@@ -324,9 +354,10 @@ Beyond the existing P0 to P3 list, roughly in order of value per effort:
    and last failure. The development guide rates read-only metadata as low to
    moderate difficulty. It replaces the plugin's estimated ETA with the real
    number, gives the menu-bar app a busy state, and is the first item of P2.
-2. **Idle-sleep assertion scoped to requests.** Hold `caffeinate -i` (or an
-   `IOPMAssertion` in the app) only while a request is in flight, so an idle
-   server never keeps the laptop awake but a long prefill is not suspended.
+2. **Idle-sleep assertion.** Done as `caffeinate -s` around the server
+   process: no idle sleep on AC while the server runs, normal sleep on
+   battery. A request-scoped variant would let an idle server on AC sleep;
+   not needed while evening runs are the goal.
 3. **Battery and thermal policy.** Refuse or defer background work on battery,
    and log `ProcessInfo.thermalState` and CPU speed limit alongside decode rate
    to see whether sustained runs throttle. The monitor already records battery
@@ -360,15 +391,16 @@ Beyond the existing P0 to P3 list, roughly in order of value per effort:
 
 ## Recommended Next Experiment
 
-Do not change the running process during an active request. After the current run
-finishes:
+The 32K experiment ran on 2026-09-11 (see "Where things stand"). The next one
+is the context sweep, which measures TTFT against prompt size on both profiles:
 
-1. Capture its completion statistics and any pressure/retry events.
-2. Run the same representative workload on a 32K continuous profile.
-3. Compare TTFT, decode rate, expert residency, memory pressure, and impact on
-   normal applications over several hours.
-4. Keep 32K if it eliminates pressure without materially hurting the workflow.
-5. Build supervision and status reporting before attempting deeper model changes.
+```sh
+scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday
+scripts/slotkeeper restart deep
+scripts/exerciser.py --sweep 32000,48000,64000 --label deep
+scripts/slotkeeper restart everyday
+```
 
-This experiment gives better evidence than raising the context limit or tuning
-the expert cache from a single startup snapshot.
+Read the result in the dashboard's "Time to first token by prompt size" chart
+or `scripts/report.py`. Decide the daytime default from that, and use it to
+size the prefix-retention change.

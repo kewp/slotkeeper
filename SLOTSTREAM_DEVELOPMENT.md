@@ -413,11 +413,19 @@ client experience; the app's unique value is keeping inference healthy.
 
 ## Recommended Sequence
 
-1. Run the 32K continuous-profile experiment.
-2. Make plugin installation independent of the repository.
-3. Add LaunchAgent or supervisor lifecycle and log rotation.
+Status 2026-09-11: steps 1, 2 (`scripts/install-plugin.sh`, shim kept for
+development), 3 and 5 are done; see `LOCAL_LLM_ROADMAP.md` "Where things
+stand". Two edge changes shipped as patches (retry wording, stale-pressure
+cross-check) and a one-command rebuild exists (`scripts/slotkeeper patch`).
+
+1. Run the 32K continuous-profile experiment. Done.
+2. Make plugin installation independent of the repository. Done.
+3. Add LaunchAgent or supervisor lifecycle and log rotation. Done.
 4. Add structured lifecycle, busy, governor, and error status to Slotstream.
-5. Build a small menu-bar prototype around the supervised executable.
+   Planned as `/api/status` in `APP_IMPLEMENTATION.md` C1. Before it: the
+   full-window prefix retention change (C2), which has more daily value.
+5. Build a small menu-bar prototype around the supervised executable. Done,
+   with a dashboard window; Stage A onwards in `APP_IMPLEMENTATION.md`.
 6. Decide whether its daily value justifies the signed-helper and model-management
    work.
 7. Attempt a second model backend only when there is a specific model and a clear
