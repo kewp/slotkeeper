@@ -199,9 +199,13 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
 
   return {
     "chat.params": async (input) => {
-      if (input.provider.info.id !== PROVIDER_ID || input.agent === "title") return
+      const providerID = input.provider?.info?.id ?? input.model.providerID
+      if (providerID !== PROVIDER_ID || input.agent === "title") return
 
-      const baseURL = input.provider.options.baseURL ?? input.provider.info.options.baseURL
+      const baseURL =
+        input.provider?.options?.baseURL ??
+        input.provider?.info?.options?.baseURL ??
+        input.model.api.url
       const runtimeURL = getRuntimeURL(baseURL)
       contextByModel.set(input.model.id, input.model.limit.context)
       if (runtimeURL) runtimeURLByModel.set(input.model.id, runtimeURL)
