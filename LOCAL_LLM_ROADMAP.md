@@ -51,12 +51,57 @@ reasoning; this is the state.
   OpenCode loop of 3,563 empty responses in three minutes at 12:49. The
   exerciser now runs heavy tasks only at night (0-7) or after 30 minutes
   idle, with a 10-minute gap between light tasks during the day.
-- Next, in order: (1) try `SLOTSTREAM_MAX_RAM_PERCENT=55` with the pressure
-  ceiling patch and rerun the sweep, looking for faster prefill without
-  pressure failures; (2) read `multi-turn-long` rows (`scripts/report.py`):
-  turn-2 TTFT at most half of turn-1, prefix hits climbing; (3) run the sweep
-  on deep; (4) app Stage A (`APP_IMPLEMENTATION.md`); (5) upstream the four
-  patches (`patches/README.md` has the PR text).
+- 23:16: cap 55 sweep on everyday: 4K 54 s (80 tok/s), 8K 130 s (61 tok/s),
+  16K failed with pressure at a steady 40 experts/layer (peak 13.2 GB, no
+  regrowth involved), then the pressure ceiling held the cache at 25 and 24K
+  (308 s, 83 tok/s) and 28K (390 s, 76 tok/s) passed. Across all three
+  sweeps every long prompt passed at 35 experts/layer or fewer and every
+  pressure failure was at 40 or more. Prefill speed varied 38 to 89 tok/s
+  with no clean link to chunk or cache size (the cap 45 run was the slowest
+  at the same cache size); suspect file-cache warmth, not yet separated.
+- 23:31: deep profile (65,536) running with cap 55: 24 experts/layer, 3.2 GB
+  pool, 13.2 GB peak, 65K prefix retention. OpenCode synced to 65,536. Deep
+  sweep at 16K, 32K, 48K, 56K running on a corpus of this repo plus
+  Slotstream's Swift sources. `~/.slotstream/profile` is now `deep`.
+
+## Path to a 131K background coding agent (Karl's goal, 2026-09-11)
+
+Goal: a coding agent with a 131K window that runs overnight or in the
+background while the Mac is in use. Slow is acceptable; it must not make the
+Mac unusable and must not lose work when it fails. What stands in the way,
+from today's evidence:
+
+1. **An interrupted prefill loses its progress.** Slotstream stores one
+   reusable checkpoint at a fixed early boundary, not periodic ones, so a
+   pressure interruption at 80% of a long prefill re-pays all of it on retry.
+   At 24K that costs 5 minutes; at 131K up to an hour, and a retry under the
+   same pressure can loop. Needed: periodic checkpoints (every 8K tokens, say)
+   that a retry of the same prompt resumes from.
+2. **Retention competes with the expert cache for RAM.** Held state is
+   27,648 bytes per token: 3.6 GB for 131K, as much as the whole expert cache
+   under the current cap, and a pressure shed drops it first. Needed: a disk
+   tier for retained prefixes and checkpoints (SSD reads 3.6 GB in about a
+   second), so retention costs disk, survives sheds and restarts, and the RAM
+   budget only carries the active request.
+3. **The 65,536 ceiling.** `ContextPolicy` plus the synchronized pieces in
+   `SLOTSTREAM_DEVELOPMENT.md`; the checkpoint declares 262,144. Active state
+   above 65K still needs RAM (~5.4 GB more than 32K at 131K), so the pool
+   runs near its floor during those requests. One to three weeks with
+   qualification runs.
+4. **Unattended runs.** A job runner around `opencode run` that queues tasks,
+   survives server restarts and retries, and writes a morning report.
+5. **Unknowns to measure first, at 65K:** prefill and decode rates at long
+   positions, peak memory during a long prefill with other apps open, whether
+   OpenCode keeps its prefix byte-stable across turns (if it rewrites history,
+   retention cannot help), and answer quality at long context.
+
+Order: finish the 65K measurements (deep sweep, then a real OpenCode session
+on deep), then 1 and 2 (they help at every window size), then 3, then 4.
+
+- Next, in order: (1) read the deep sweep; (2) a real long OpenCode session
+  on deep, read with `scripts/report.py` (follow-up TTFT, prefix hits);
+  (3) resumable prefill; (4) disk-backed retention; (5) lift the ceiling to
+  131K; (6) job runner; later: app Stage A, upstream the patches.
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
   Mac must stay usable, a cheaper model may continue the work (hence the
   hand-off docs).
