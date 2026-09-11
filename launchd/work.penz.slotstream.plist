@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>work.penz.slotstream</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__CTL__</string>
+    <string>run</string>
+  </array>
+  <!-- Start at login. Set to false to keep a manual `slotstream-ctl.sh start`. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart only after a crash (non-zero exit). A clean SIGTERM stop stays stopped. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- Bounded backoff: launchd will not respawn faster than this. Bad config (port held,
+       missing weights) exits quickly and repeatedly; check `slotstream-ctl.sh logs`. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>Nice</key>
+  <integer>0</integer>
+</dict>
+</plist>

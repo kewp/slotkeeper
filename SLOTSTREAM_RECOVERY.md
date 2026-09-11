@@ -186,10 +186,14 @@ ln -s "$release" "$HOME/.slotstream/bin.next"
 mv -h -f "$HOME/.slotstream/bin.next" "$HOME/.slotstream/bin"
 ```
 
-Restart Slotstream with persistent output:
+Restart Slotstream with persistent output, either directly or through the
+control script (which also checks the port, rotates the log, and waits for
+readiness):
 
 ```sh
 nohup ~/.slotstream/bin/slotstream serve --max-context 65536 >> ~/.slotstream/slotstream.log 2>&1 &
+# or
+scripts/slotstream-ctl.sh start deep
 ```
 
 Then verify the process, health response, and artifact hashes. Restart OpenCode
@@ -217,6 +221,10 @@ after plugin changes so the current process loads the new plugin code.
 - `6650f3e` Handle commands without provider context
 - `a56361d` Improve live Slotstream stats
 - `3cca117` Report and recover Slotstream failures
+- `89a3631` Document Slotstream recovery setup
+- `c4bb5d1` Add CLAUDE.md
 
-The logging and documentation changes after `3cca117` may remain uncommitted;
-check `git status` before preparing a release or commit.
+Operational tooling (`scripts/`, `launchd/`, `SlotstreamBar/`) was added on
+2026-09-11; see `LOCAL_LLM_ROADMAP.md` "Tooling Added". Use
+`scripts/slotstream-ctl.sh bundle` to capture the state described in this file
+before and after a rebuild.

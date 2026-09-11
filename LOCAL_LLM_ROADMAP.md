@@ -1,6 +1,6 @@
 # Reliable Local LLM Roadmap
 
-Last updated: 2026-09-11
+Last updated: 2026-09-11 (plan review and tooling added)
 
 ## Goal
 
@@ -136,7 +136,11 @@ Effort: hours to two days.
 
 ### P1: Supervise the service
 
-Effort: two to five days for a solid personal setup.
+Effort: two to five days for a solid personal setup. A first pass exists in
+`scripts/slotstream-ctl.sh` and `launchd/work.penz.slotstream.plist`; the items
+below that it does not yet cover are sleep/wake handling and failure
+notifications from the supervisor itself (the monitor notifies on pressure and
+disk).
 
 - Replace ad hoc `nohup` startup with a user LaunchAgent or small supervisor.
 - Start at login only if desired; otherwise expose one deterministic start
@@ -222,6 +226,107 @@ See `SLOTSTREAM_DEVELOPMENT.md` for the app architecture and effort breakdown.
   and one inference smoke test before switching versions.
 - Keep the previous complete release directory for immediate rollback rather
   than replacing files in place indefinitely.
+
+## Plan Review (2026-09-11)
+
+The sequence in the three documents is sound: evidence before tuning, supervision
+before a controller, no chat UI in the app, and no second model backend without
+a concrete reason. Nothing in it needs reversing. Inspecting the live machine
+did surface facts the plans do not yet account for:
+
+- **Ollama shares the port.** `/usr/local/bin/ollama` is installed and the
+  OpenCode config declares both an `ollama` and a `slotstream` provider on
+  `localhost:11434`. Whichever starts first wins the port; the other fails or, if
+  Ollama's app auto-starts at login, Slotstream can never bind. The control
+  script now names the squatter instead of failing silently. Moving Slotstream
+  to another port and updating one `baseURL` removes the ambiguity for good.
+- **Disk is nearly full.** 14 GiB free on a 460 GiB volume, with 98 GB of model
+  weights. Swap grows under exactly the pressure this project is trying to
+  survive, and swap needs disk. The monitor alerts below a 6 GiB floor. The
+  `pack-experts` contiguous artifact is not an option at this free space.
+- **The Mac sleeps after one minute idle** unless something holds a
+  `caffeinate` assertion. A server survives sleep, but an in-flight request is
+  suspended mid-prefill and its client deadline keeps running. The supervisor
+  should hold an idle-sleep assertion only while a request is active.
+- **The current plan is starved.** After elastic shrink the running server holds
+  13 experts/layer in a 1.8 GB pool with a ~2.7 tok/s planned warm decode; a
+  measured short request decoded at 2.35 tok/s. This is the 65K window plus
+  other applications competing for a 24 GB machine, and it is the strongest
+  argument for the 32K experiment.
+- **Pressure can be simulated.** `memory_pressure -S -l warn|critical` makes the
+  kernel report a level without allocating. Slotstream reacts to the OS
+  notification, so the untested retry path can be exercised on demand with
+  `scripts/pressure-drill.sh`.
+- **Title generation hits the local model.** OpenCode's `title` agent sends a
+  request after each turn, competing for the single-flight gate and triggering a
+  prefill. Point OpenCode's `small_model` at a cheaper provider (or a cloud
+  model) so the local server only serves real work.
+- The expanded patch (25,402 T0 assertions) is built but not installed; the
+  running binary is the earlier patched build from 15:20. Install it at the next
+  controlled restart as `SLOTSTREAM_RECOVERY.md` says.
+
+## Tooling Added (2026-09-11)
+
+The roadmap asked for a week of evidence but had nothing to collect it. These
+live in `scripts/`, `launchd/`, and `SlotstreamBar/`; none of them require a
+Slotstream rebuild and none were applied to the running server.
+
+| Tool | Purpose | Status |
+| --- | --- | --- |
+| `scripts/slotstream-ctl.sh` | start/stop/restart/status/health, named profiles, port-conflict and disk checks, log rotation, doctor guard, support bundle, LaunchAgent install | verified `status` against the live server |
+| `launchd/work.penz.slotstream.plist` | user LaunchAgent: restart on crash only, 30 s throttle, log capture | lint-clean, not installed |
+| `scripts/monitor.sh` | 30 s JSONL samples of pressure, swap, disk, battery, process, plan and prefix-cache state, with notifications | running in the background since 16:34 |
+| `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
+| `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | written, not run |
+| `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
+| `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle | builds and runs |
+
+The plugin still loads through the repo shim on purpose while the plugin
+changes daily. Switch to the copy when it settles.
+
+## Additional Ideas
+
+Beyond the existing P0 to P3 list, roughly in order of value per effort:
+
+1. **Slotstream status endpoint.** A read-only `GET /api/status` (or richer
+   `/api/ps`) exposing lifecycle phase, active request id, prefill progress
+   (tokens done/total, ETA), queue depth, governor state and resize history,
+   and last failure. The development guide rates read-only metadata as low to
+   moderate difficulty. It replaces the plugin's estimated ETA with the real
+   number, gives the menu-bar app a busy state, and is the first item of P2.
+2. **Idle-sleep assertion scoped to requests.** Hold `caffeinate -i` (or an
+   `IOPMAssertion` in the app) only while a request is in flight, so an idle
+   server never keeps the laptop awake but a long prefill is not suspended.
+3. **Battery and thermal policy.** Refuse or defer background work on battery,
+   and log `ProcessInfo.thermalState` and CPU speed limit alongside decode rate
+   to see whether sustained runs throttle. The monitor already records battery
+   state and speed limit.
+4. **Profile as single source of truth.** `~/.slotstream/profile` drives the
+   server window; a small `sync-opencode` step should rewrite the provider's
+   `limit.context` to match so the two cannot drift. Blocked only by the config
+   being JSONC (the file currently has a trailing comma), so it needs a tolerant
+   parser rather than `jq`.
+5. **Prompt-budget preflight in the plugin.** Before a request, compare the
+   estimated prompt against the plan's prefill rate and headroom, and warn (or
+   suggest compaction) when the ETA exceeds a threshold or the prompt is within
+   a few thousand tokens of the window. Pair with OpenCode compaction around
+   70% of a 32K window.
+6. **Structured JSON logging in Slotstream** (`--log-format json`). Moderate
+   effort; makes the monitor, the app, and the support bundle robust against
+   wording changes like the one the retry patch depends on.
+7. **Idle cache policy.** After N idle minutes, shrink the expert pool to a
+   baseline without unloading the trunk; after M hours on battery, stop. The
+   first needs a Slotstream admin endpoint; the second is a supervisor rule.
+8. **Weekly evidence report.** A script that folds `metrics/*.jsonl` and
+   `bench.jsonl` into a short table: pressure minutes per day, resize events,
+   decode rate versus experts/layer, TTFT versus prompt size, failures and
+   retries. Decide profile changes from that, not from single snapshots.
+9. **SSD throughput baseline.** Decode is bounded by expert reads from disk when
+   the cache is small. Measure sequential read speed once (the plan assumes a
+   17.3 GB/s reference) so slow decode can be attributed correctly.
+10. **Separate the plugin's two roles.** Split observation (toasts, log record)
+    from advice (headroom warnings, ETA) so the observation half can be
+    published as a generic OpenAI-compatible-provider stats plugin.
 
 ## Recommended Next Experiment
 

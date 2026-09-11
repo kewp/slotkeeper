@@ -61,6 +61,24 @@ The default provider id is `slotstream`. Change `PROVIDER_ID` at the top of
 `model-stats.ts` if your OpenCode provider uses another id. Toast durations and
 the live refresh interval are configured beside it.
 
+## Operations tooling
+
+Alongside the plugin, the repo carries the scripts used to run Slotstream as a
+continuous local service. None of them need a Slotstream rebuild.
+
+```sh
+scripts/slotstream-ctl.sh status          # process, port owner, plan, cache, pressure, profile mismatch
+scripts/slotstream-ctl.sh start everyday  # 32K window; also: conservative (16K), deep (65K), or a number
+scripts/slotstream-ctl.sh install-agent   # LaunchAgent: restart on crash, log capture
+scripts/monitor.sh 30                     # JSONL samples to ~/.slotstream/metrics/
+scripts/bench.py --label 32k              # TTFT / prefill / decode measurements to metrics/bench.jsonl
+scripts/pressure-drill.sh                 # simulated memory pressure during prefill; checks retry wording
+scripts/install-plugin.sh                 # standalone plugin copy (or --link for the repo shim)
+```
+
+`SlotstreamBar/` is a SwiftUI menu-bar prototype that supervises the server
+through the control script: `cd SlotstreamBar && swift run`.
+
 ## Development
 
 ```sh

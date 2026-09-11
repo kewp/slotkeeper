@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-file OpenCode plugin (`model-stats.ts`) that shows live prefill timing, completion stats, and failure diagnostics for a local Slotstream model, plus a Slotstream source patch (`patches/`) that makes its memory-pressure errors retryable by OpenCode. The three `SLOTSTREAM_*.md` / `LOCAL_LLM_ROADMAP.md` docs are the operational reference; keep them accurate when behavior changes.
+The home of a larger effort: run a local model (Slotstream serving Qwen3.8-Flash-Next on a 24 GB M4 Pro) continuously while the Mac stays usable. It holds:
+
+- `model-stats.ts`: single-file OpenCode plugin with live prefill timing, completion stats, and failure diagnostics.
+- `patches/`: Slotstream source patch making pre-output memory-pressure errors retryable by OpenCode.
+- `scripts/` + `launchd/`: lifecycle control, LaunchAgent, metrics monitor, benchmark, pressure drill, plugin installer. Bash + jq + python3, no build step.
+- `SlotstreamBar/`: SwiftUI menu-bar supervisor prototype (`swift build` / `swift run` in that directory; macOS 14+, tools 5.10, `-parse-as-library`). It shells out to `scripts/slotstream-ctl.sh` and never loads the model.
+- `LOCAL_LLM_ROADMAP.md`, `SLOTSTREAM_DEVELOPMENT.md`, `SLOTSTREAM_RECOVERY.md`: the operational reference. Keep them accurate when behavior changes; the roadmap's "Plan Review" and "Tooling Added" sections track what exists versus what is planned.
 
 ## Commands
 
@@ -16,6 +22,15 @@ patch --dry-run --forward --batch -p1 < patches/slotstream-0.2.14-opencode-retry
 ```
 
 Validation is manual: install the plugin, restart OpenCode, run a request against Slotstream, and check the toast and `~/.local/share/opencode/log/opencode.log` (service `model-stats`).
+
+Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`, `plutil -lint launchd/*.plist`. `scripts/slotstream-ctl.sh status` and `MONITOR_ONCE=1 scripts/monitor.sh` are read-only against the live server and safe to run any time.
+
+## Operating rules
+
+- Never restart or stop the Slotstream server while a request is in flight, and do not restart it just to test something; the user relies on it from OpenCode. Read-only endpoints (`/api/version`, `/api/ps`, `/api/show`) are fine. `slotstream doctor` must not run while the model is loaded.
+- `scripts/pressure-drill.sh` and `scripts/bench.py --set long` load the machine; run them only when asked.
+- Server window and OpenCode's `limit.context` for provider `slotstream` must match. `slotstream-ctl.sh status` warns on mismatch. The OpenCode config is JSONC (trailing commas), so do not parse it with `jq`.
+- Profiles: everyday 32768, conservative 16384, deep 65536, persisted in `~/.slotstream/profile`. Ollama is installed and shares port 11434; the control script refuses to start over a foreign listener.
 
 ## Deployment
 
