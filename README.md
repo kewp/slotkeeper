@@ -8,8 +8,10 @@ operations, validation, and recovery reference.
 
 See [LOCAL_LLM_ROADMAP.md](LOCAL_LLM_ROADMAP.md) for the reliability roadmap,
 [SLOTSTREAM_DEVELOPMENT.md](SLOTSTREAM_DEVELOPMENT.md) for context changes,
-engine development, and future-model support, and [APP_PLAN.md](APP_PLAN.md)
-for the full-app plan and the analysis of context windows beyond 65K.
+engine development, and future-model support, [APP_PLAN.md](APP_PLAN.md)
+for the full-app plan and the analysis of context windows beyond 65K, and
+[APP_IMPLEMENTATION.md](APP_IMPLEMENTATION.md) for the hand-off guide: data
+contracts, code map, staged tasks, verification, traps.
 
 ## Features
 
