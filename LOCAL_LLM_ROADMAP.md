@@ -98,10 +98,28 @@ from today's evidence:
 Order: finish the 65K measurements (deep sweep, then a real OpenCode session
 on deep), then 1 and 2 (they help at every window size), then 3, then 4.
 
-- Next, in order: (1) read the deep sweep; (2) a real long OpenCode session
-  on deep, read with `scripts/report.py` (follow-up TTFT, prefix hits);
-  (3) resumable prefill; (4) disk-backed retention; (5) lift the ceiling to
-  131K; (6) job runner; later: app Stage A, upstream the patches.
+- 2026-09-12 00:30, deep sweep (65,536 window, 24 experts/layer): 19K in
+  3.6 min (89 tok/s), 31K in 9.8 min (52), 48K in 16.1 min (49), and 56K
+  refused 19 min in at 76% by the admission check, with the machine at normal
+  pressure the whole night. Prefill rate falls with prompt length (89 to 33
+  tok/s between 19K and 54K), so a cold 131K prompt would take one and a half
+  to two hours at this rate.
+- 00:41: fifth patch installed, `slotstream-0.2.14-resume-after-refusal`: a
+  refusal at a pass boundary keeps the prefix already committed, and a
+  governor shrink no longer drops a long retained prefix before shedding the
+  pool.
+- 01:40: prefix reuse verified live on deep with a 15.7K conversation: 279 s
+  cold, 0.4 s for an exact repeat, 3.9 s for a follow-up question, with the
+  server's hit counter going 0 to 2. This is the C2 qualification. A 54K
+  prompt re-read from scratch took 27.2 min, so what a long session costs
+  depends entirely on whether its prefix survives.
+- Next, in order: (1) prove the resume path on a refused 58K prompt (running);
+  (2) a real long OpenCode session on deep, read with `scripts/report.py`
+  (follow-up TTFT, prefix hits) — the open question is whether OpenCode keeps
+  earlier messages byte-identical between turns; (3) disk-backed retention and
+  periodic checkpoints, so a prefix survives sheds, restarts and the RAM
+  budget; (4) lift the ceiling to 131K; (5) job runner; later: app Stage A,
+  upstream the five patches.
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
   Mac must stay usable, a cheaper model may continue the work (hence the
   hand-off docs).
