@@ -79,6 +79,13 @@ number. Read by the control script at start.
  "plan_after":{...same...}}
 ```
 
+Scheduling: heavy tasks run only inside `EXERCISER_HEAVY_HOURS` (default
+0-7 local) or after `EXERCISER_HEAVY_IDLE_MIN` (default 30) minutes without
+keyboard or mouse input; otherwise they are skipped for that cycle, and the
+gap between light tasks is `EXERCISER_DAY_GAP_S` (default 600 s). The state
+file's `heavy` key says which applies (`heavy allowed (hours 0-7)`,
+`heavy allowed (idle 42 min)`, `heavy deferred to ...`).
+
 Task names: `short-chat`, `code-review`, `multi-turn`, `multi-turn-long`,
 `tool-call`, `json-answer`, `codebase-8k`, `codebase-16k`, `codebase-max`,
 `long-generation`, `context-overflow`, `cancel-mid-prefill`,
@@ -141,10 +148,27 @@ memory pressure: OS level still elevated but 10.7 GB reclaimable (stale threshol
 
 Timestamps are local time, no date. Rotated at 10 MB to `slotstream.log.1..5`.
 
-### 1.10 OpenCode plugin log records
+### 1.10 OpenCode request records
 
-`~/.local/share/opencode/log/*.log`, JSON lines with `"service":"model-stats"`.
-`extra` carries `sessionID, messageID, modelID, agent, finish, contextLimit,
+Two sources, joined on message id by `scripts/report.py`:
+
+- `~/.local/share/opencode/opencode.db` (SQLite, open read-only). Table
+  `message`, column `data` is JSON: `providerID`, `modelID`, `agent`, `role`,
+  `tokens {input, output, reasoning, cache {read, write}}`, `time {created,
+  completed}` (ms), `finish`, `error {name, data {message}}`, `path.cwd`.
+  Table `part` (`message_id`, JSON `data`): `type` text/reasoning/tool, with
+  `time.start` (tool: `state.time.start`). TTFT = first such start minus
+  `time.created`. Assistant messages with zero tokens, no error and finish
+  `unknown` are empty steps; OpenCode looped 3,562 of them in three minutes
+  on 2026-09-11, so count them as failures. History goes back as far as
+  OpenCode keeps sessions.
+- `~/.slotstream/metrics/opencode.jsonl`, one line per request written by the
+  plugin (from the OpenCode restart after 2026-09-11 22:50): `ts`, `ok`, and
+  the fields below. The plugin's `client.app.log` records were supposed to
+  land in `~/.local/share/opencode/log/*.log`, but OpenCode 1.18 does not
+  write them there, so do not read the log for them.
+
+Fields: `extra` carries `sessionID, messageID, modelID, agent, finish, contextLimit,
 contextUsedPercent, promptTokens, promptDelta, freshInputTokens,
 cachedInputTokens, cacheWriteTokens, cacheHitRate, outputTokens,
 reasoningTokens, ttftMs, decodeMs, totalMs` plus the runtime plan and prefix

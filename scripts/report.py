@@ -3,19 +3,32 @@
 
 Usage: report.py [--hours N] [--json]     (default: last 24 hours)
 
-Reads ~/.slotstream/metrics/{exerciser.jsonl,bench.jsonl,YYYY-MM-DD.jsonl} and prints:
+Your own OpenCode sessions come first: every assistant message sent to the local
+provider, read from OpenCode's database (~/.local/share/opencode/opencode.db, read-only)
+and joined with the plugin's rows in ~/.slotstream/metrics/opencode.jsonl when present:
+  - requests, sessions, errors by kind, and how long the model was busy for you
+  - TTFT by prompt size, and follow-up turns versus cold prompts (is the prefix reused?)
+  - decode rate
+Then the synthetic evidence from ~/.slotstream/metrics/{exerciser.jsonl,bench.jsonl,YYYY-MM-DD.jsonl}:
   - pass/fail per task with median TTFT, prefill and decode rates
   - failures and their notes
   - decode rate versus expert-cache size (does more cache actually help?)
   - pressure minutes, cache resize events, battery time, disk floor
   - server process CPU/RSS peaks during tasks
 """
-import argparse, glob, json, os, statistics, sys
+import argparse, glob, json, os, sqlite3, statistics, sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
 M = os.path.join(HOME, "metrics")
+OPENCODE_DB = os.environ.get("OPENCODE_DB", os.path.expanduser("~/.local/share/opencode/opencode.db"))
+PROVIDER = os.environ.get("SLOTSTREAM_PROVIDER_ID", "slotstream")
+PROMPT_BUCKETS = [(0, 2000, "<2K"), (2000, 8000, "2-8K"), (8000, 16000, "8-16K"), (16000, 24000, "16-24K"), (24000, 10**9, "24K+")]
+
+
+def rows_of(path):
+    return rows(path)
 
 
 def rows(path):
@@ -43,6 +56,135 @@ def med(vals):
     return round(statistics.median(vals), 2) if vals else None
 
 
+def pct(vals, q):
+    vals = sorted(v for v in vals if isinstance(v, (int, float)))
+    return round(vals[min(len(vals) - 1, int(q * len(vals)))], 1) if vals else None
+
+
+def error_kind(err):
+    """OpenCode stores provider errors as {name, data: {message}}; the message may be Slotstream's JSON body."""
+    if not err:
+        return None
+    if err.get("name") == "MessageAbortedError":
+        return "aborted"
+    msg = str((err.get("data") or {}).get("message", ""))
+    try:
+        code = json.loads(msg).get("code")
+        if code:
+            return code
+    except (ValueError, AttributeError):
+        pass
+    for code in ("insufficient_memory", "prefill_wait_exceeded", "prefill_deadline_exceeded", "context_length_exceeded"):
+        if code in msg:
+            return code
+    return "other"
+
+
+def opencode_requests(since):
+    """One dict per assistant message on the local provider since `since`, oldest first.
+
+    TTFT is the first text, reasoning or tool part's start minus the message's creation;
+    a follow-up is a turn whose prompt adds at most a quarter to the previous turn's
+    prompt plus output in the same session and agent, which is what prefix reuse serves."""
+    if not os.path.exists(OPENCODE_DB):
+        return []
+    try:
+        db = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True, timeout=5)
+        rows = db.execute("""
+            select m.id, m.session_id, m.data,
+              (select min(coalesce(json_extract(p.data,'$.time.start'), json_extract(p.data,'$.state.time.start')))
+                 from part p where p.message_id = m.id
+                  and json_extract(p.data,'$.type') in ('text','reasoning','tool'))
+            from message m
+            where m.time_created >= ? and json_extract(m.data,'$.providerID') = ?
+              and json_extract(m.data,'$.role') = 'assistant'
+            order by m.time_created""", (int(since.timestamp() * 1000), PROVIDER)).fetchall()
+    except sqlite3.Error as e:
+        print(f"(OpenCode database unreadable: {e})", file=sys.stderr)
+        return []
+    plugin = {r.get("messageID"): r for r in rows_of(os.path.join(M, "opencode.jsonl"))}
+    out, last = [], {}
+    for mid, sid, data, first in rows:
+        d = json.loads(data)
+        t = d.get("time") or {}
+        tok = d.get("tokens") or {}
+        cache = tok.get("cache") or {}
+        prompt = (tok.get("input") or 0) + (cache.get("read") or 0) + (cache.get("write") or 0)
+        output = tok.get("output") or 0
+        created, done = t.get("created"), t.get("completed")
+        ttft = (first - created) / 1000 if first and created and first >= created else None
+        decode_s = (done - first) / 1000 if done and first and done > first else None
+        key = (sid, d.get("agent"))
+        prev = last.get(key)
+        followup = bool(prev and prompt >= 2000 and prompt - (prev[0] + prev[1]) <= 0.25 * prompt)
+        if prompt:
+            last[key] = (prompt, output)
+        err = error_kind(d.get("error"))
+        if not err and not prompt and not output and d.get("finish") in (None, "unknown"):
+            # A step that consumed and produced nothing: on 2026-09-11 OpenCode looped
+            # 3,562 of these in three minutes against the server. A failure, not a request.
+            err = "empty"
+        row = {"id": mid, "session": sid, "agent": d.get("agent"), "ts": created, "prompt": prompt, "output": output,
+               "ttft_s": ttft, "decode_tok_s": round(output / decode_s, 2) if decode_s and output > 1 else None,
+               "total_s": (done - created) / 1000 if done and created else None, "error": err, "followup": followup,
+               "cwd": (d.get("path") or {}).get("cwd")}
+        extra = plugin.get(mid)
+        if extra:
+            row["experts_per_layer"] = extra.get("expertsCachedPerLayer")
+            row["pressure"] = extra.get("pressure")
+            if extra.get("ttftMs") is not None:
+                row["ttft_s"] = extra["ttftMs"] / 1000  # the plugin's stopwatch is the exact one
+        out.append(row)
+    return out
+
+
+def opencode_summary(reqs):
+    if not reqs:
+        return None
+    ok = [r for r in reqs if not r["error"]]
+    kinds = defaultdict(int)
+    for r in reqs:
+        if r["error"]:
+            kinds[r["error"]] += 1
+    buckets = {}
+    for lo, hi, label in PROMPT_BUCKETS:
+        rs = [r for r in ok if lo <= r["prompt"] < hi and r["ttft_s"] is not None]
+        if rs:
+            buckets[label] = {"n": len(rs), "ttft_med_s": med([r["ttft_s"] for r in rs]), "ttft_p90_s": pct([r["ttft_s"] for r in rs], 0.9),
+                              "followups": sum(r["followup"] for r in rs)}
+    def split(rs):
+        return {"n": len(rs), "ttft_med_s": med([r["ttft_s"] for r in rs]), "prompt_med": med([r["prompt"] for r in rs])}
+    big = [r for r in ok if r["prompt"] >= 8000 and r["ttft_s"] is not None]
+    return {
+        "requests": len(reqs), "sessions": len({r["session"] for r in reqs}), "errors": dict(kinds),
+        "busy_hours": round(sum(r["total_s"] or 0 for r in reqs) / 3600, 2),
+        "prompt_med": med([r["prompt"] for r in ok]), "prompt_p90": pct([r["prompt"] for r in ok], 0.9),
+        "output_med": med([r["output"] for r in ok]),
+        "ttft_med_s": med([r["ttft_s"] for r in ok]), "ttft_p90_s": pct([r["ttft_s"] for r in ok], 0.9),
+        "decode_med": med([r["decode_tok_s"] for r in ok]),
+        "ttft_by_prompt": buckets,
+        # Above 8K a cold prompt costs minutes; a reused prefix should make a follow-up cost seconds.
+        "over_8k_followup": split([r for r in big if r["followup"]]), "over_8k_cold": split([r for r in big if not r["followup"]]),
+        "recent_errors": grouped_errors(reqs)[-8:],
+    }
+
+
+def grouped_errors(reqs):
+    """Consecutive errors of one kind in one session collapse into a single line with a count."""
+    out = []
+    for r in reqs:
+        if not r["error"]:
+            continue
+        stamp = datetime.fromtimestamp(r["ts"] / 1000, timezone.utc).astimezone().isoformat(timespec="seconds")
+        if out and out[-1]["session"] == r["session"] and out[-1]["kind"] == r["error"]:
+            out[-1]["count"] += 1
+            out[-1]["last"] = stamp
+            continue
+        out.append({"ts": stamp, "last": stamp, "kind": r["error"], "count": 1, "session": r["session"],
+                    "prompt": r["prompt"], "pressure": r.get("pressure"), "cwd": r.get("cwd")})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=24)
@@ -57,6 +199,7 @@ def main():
         mon += [r for r in rows(f) if (ts(r) or since) >= since]
 
     report = {"window_hours": a.hours, "exerciser_runs": len(ex), "bench_runs": len(bench), "monitor_samples": len(mon)}
+    report["opencode"] = opencode_summary(opencode_requests(since))
 
     # per task
     by = defaultdict(list)
@@ -110,7 +253,29 @@ def main():
         print(json.dumps(report, indent=2))
         return
 
-    print(f"last {a.hours:g}h: {len(ex)} exerciser runs, {len(bench)} bench runs, {len(mon)} monitor samples\n")
+    oc = report["opencode"]
+    if oc:
+        answered = oc["requests"] - sum(oc["errors"].values())
+        print(f"your OpenCode sessions on the local model, last {a.hours:g}h: {answered} answered, {sum(oc['errors'].values())} failed, "
+              f"{oc['sessions']} sessions, model busy {oc['busy_hours']} h")
+        if oc["errors"]:
+            print("  failures by kind: " + ", ".join(f"{k} {v}" for k, v in sorted(oc["errors"].items(), key=lambda kv: -kv[1])))
+        print(f"  prompt median {oc['prompt_med']} tok (p90 {oc['prompt_p90']}), output median {oc['output_med']} | "
+              f"TTFT median {oc['ttft_med_s']} s (p90 {oc['ttft_p90_s']}) | decode median {oc['decode_med']} tok/s")
+        if oc["ttft_by_prompt"]:
+            print("  TTFT by prompt size:  " + "   ".join(
+                f"{k}: n={v['n']} med {v['ttft_med_s']} s p90 {v['ttft_p90_s']} s" for k, v in oc["ttft_by_prompt"].items()))
+        f, c = oc["over_8k_followup"], oc["over_8k_cold"]
+        if f["n"] or c["n"]:
+            print(f"  prompts over 8K: follow-up turns n={f['n']} TTFT median {f['ttft_med_s']} s | cold n={c['n']} TTFT median {c['ttft_med_s']} s")
+        for e in oc["recent_errors"]:
+            times = f"{e['count']}x {e['ts']} .. {e['last'][11:19]}" if e["count"] > 1 else e["ts"]
+            print(f"  error {times} {e['kind']}" + (f" prompt {e['prompt']}" if e["prompt"] else "")
+                  + (f" pressure {e['pressure']}" if e.get("pressure") else "") + (f" in {e['cwd']}" if e.get("cwd") else ""))
+        print()
+    else:
+        print(f"no OpenCode requests to provider '{PROVIDER}' in the last {a.hours:g}h\n")
+    print(f"synthetic, last {a.hours:g}h: {len(ex)} exerciser runs, {len(bench)} bench runs, {len(mon)} monitor samples\n")
     if tasks:
         print(f"{'task':20s} {'runs':>4} {'ok':>3} {'fail':>4} {'prompt':>7} {'TTFT s':>7} {'prefill':>8} {'decode':>7} {'cpu%':>5}")
         for n, t in tasks.items():

@@ -62,7 +62,7 @@ scripts/slotkeeper status            # process, port, plan, cache, pressure, pro
 scripts/slotkeeper restart deep      # 65K window for a long session; 'restart everyday' for 32K
 scripts/slotkeeper exerciser status  # background suite; also pause / resume / report
 scripts/slotkeeper logs 100
-scripts/report.py --hours 24                # what has been measured
+scripts/report.py --hours 24                # your OpenCode sessions first, then the synthetic suite
 scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # TTFT by prompt size
 scripts/bench.py --label mytest             # one-off measurement
 scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)

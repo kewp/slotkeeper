@@ -19,6 +19,12 @@ Settings (env or ctl.env):
   EXERCISER_GAP_S            idle gap between tasks (default 90)
   EXERCISER_PAUSE_ON_BATTERY 1 = pause while discharging (default 1)
   EXERCISER_MAX_PROMPT       largest prompt the long tasks build, tokens (default 24000)
+  EXERCISER_HEAVY_HOURS      local hours when heavy tasks (long prefills) may run, start-end,
+                             wrapping midnight (default 0-7); outside them they are skipped
+  EXERCISER_HEAVY_IDLE_MIN   heavy tasks may also run after this many minutes without keyboard
+                             or mouse input (default 30; 0 = never outside the hours)
+  EXERCISER_DAY_GAP_S        gap between tasks while heavy tasks are not allowed (default 600),
+                             so the light suite stays a trickle while you are using the Mac
 
 Usage: exerciser.py            run forever
        exerciser.py --once     run one full cycle and exit
@@ -49,6 +55,9 @@ REPOS = [p for p in os.environ.get("EXERCISER_REPOS", REPO).split(":") if p]
 GAP_S = float(os.environ.get("EXERCISER_GAP_S", "90"))
 PAUSE_ON_BATTERY = os.environ.get("EXERCISER_PAUSE_ON_BATTERY", "1") == "1"
 MAX_PROMPT = int(os.environ.get("EXERCISER_MAX_PROMPT", "24000"))
+HEAVY_HOURS = os.environ.get("EXERCISER_HEAVY_HOURS", "0-7")
+HEAVY_IDLE_MIN = float(os.environ.get("EXERCISER_HEAVY_IDLE_MIN", "30"))
+DAY_GAP_S = float(os.environ.get("EXERCISER_DAY_GAP_S", "600"))
 OUT = os.path.join(HOME, "metrics", "exerciser.jsonl")
 STATE = os.path.join(HOME, "exerciser.state.json")
 PAUSE = os.path.join(HOME, "exerciser.pause")
@@ -580,6 +589,37 @@ def run_task(name):
     return row
 
 
+def user_idle_minutes():
+    """Minutes since the last keyboard or mouse input (IOHIDSystem HIDIdleTime), None if unreadable."""
+    for line in sh(["ioreg", "-c", "IOHIDSystem", "-d", "4"]).splitlines():
+        if '"HIDIdleTime"' in line:
+            try:
+                return int(line.rsplit("=", 1)[1].strip()) / 1e9 / 60
+            except ValueError:
+                return None
+    return None
+
+
+def in_heavy_hours(hour=None):
+    try:
+        start, end = (int(x) for x in HEAVY_HOURS.split("-"))
+    except ValueError:
+        return False
+    h = datetime.now().hour if hour is None else hour
+    return start <= h < end if start <= end else (h >= start or h < end)
+
+
+def heavy_allowed():
+    """(allowed, reason). Heavy tasks load the machine for minutes and evict the expert cache your
+    own sessions warmed, so they run at night or while you are away, never while you work."""
+    if in_heavy_hours():
+        return True, f"heavy allowed (hours {HEAVY_HOURS})"
+    idle = user_idle_minutes()
+    if HEAVY_IDLE_MIN > 0 and idle is not None and idle >= HEAVY_IDLE_MIN:
+        return True, f"heavy allowed (idle {idle:.0f} min)"
+    return False, f"heavy deferred to hours {HEAVY_HOURS}" + (f" or {HEAVY_IDLE_MIN:g} min idle" if HEAVY_IDLE_MIN > 0 else "")
+
+
 def cycle_order():
     order = []
     for name, (_, weight, _) in TASKS.items():
@@ -671,11 +711,18 @@ def main():
         for name in cycle_order():
             if stop or not wait_while_paused():
                 break
+            allowed, why = heavy_allowed()
+            if why != state.get("heavy"):
+                state["heavy"] = why
+                write_state()
+            if TASKS[name][2] and not allowed:
+                continue  # skipped this cycle; it comes round again at night or when you are away
             run_task(name)
             # Rest between tasks, but keep the published state honest: re-evaluate the
             # yield rules every few seconds so the app shows "waiting: OpenCode active"
             # as soon as a real request starts, not only when the next task is due.
-            for i in range(int(args.gap)):
+            gap = args.gap if heavy_allowed()[0] else max(args.gap, DAY_GAP_S)
+            for i in range(int(gap)):
                 if stop:
                     break
                 if i % 5 == 0:

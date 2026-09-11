@@ -44,6 +44,13 @@ reasoning; this is the state.
   Decode was 2.9 to 3.3 tok/s in both. The 28K point hit the configured
   10-minute prefill budget, not memory. Fourth patch (governor pressure
   ceiling) installed the same evening.
+- 22:50: `report.py` now leads with your own OpenCode sessions, read from
+  OpenCode's database. Today's 22 answered requests before the prefix patch:
+  follow-up turns over 8K had median TTFT 130 s against 149 s cold, so the
+  history was re-read almost from scratch every turn. It also found an
+  OpenCode loop of 3,563 empty responses in three minutes at 12:49. The
+  exerciser now runs heavy tasks only at night (0-7) or after 30 minutes
+  idle, with a 10-minute gap between light tasks during the day.
 - Next, in order: (1) try `SLOTSTREAM_MAX_RAM_PERCENT=55` with the pressure
   ceiling patch and rerun the sweep, looking for faster prefill without
   pressure failures; (2) read `multi-turn-long` rows (`scripts/report.py`):

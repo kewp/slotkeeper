@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import type { Part } from "@opencode-ai/sdk"
-import { mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -9,6 +9,17 @@ const COMPLETED_TOAST_MS = 24 * 60 * 60 * 1000
 const PREFILL_REFRESH_MS = 15 * 1000
 // Marker the background exerciser watches so it never competes with a real request.
 const ACTIVE_MARKER = join(homedir(), ".slotstream", "opencode-active")
+// One JSON line per completed or failed request, read by scripts/report.py and the app.
+// client.app.log records do not reach OpenCode 1.18's log file, so this is the durable copy.
+const METRICS_FILE = join(homedir(), ".slotstream", "metrics", "opencode.jsonl")
+
+function recordMetrics<T extends Record<string, unknown>>(ok: boolean, extra: T): T {
+  try {
+    mkdirSync(join(homedir(), ".slotstream", "metrics"), { recursive: true })
+    appendFileSync(METRICS_FILE, JSON.stringify({ ts: new Date().toISOString(), ok, ...extra }) + "\n")
+  } catch {}
+  return extra
+}
 
 type ActiveInfo = {
   sessionID: string
@@ -534,7 +545,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
               service: "model-stats",
               level: "error",
               message: summary.replaceAll("\n", " | "),
-              extra: {
+              extra: recordMetrics(false, {
                 sessionID: info.sessionID,
                 messageID: info.id,
                 modelID: info.modelID,
@@ -552,7 +563,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
                 prefixCacheHits: runtime?.prefixCacheHits ?? null,
                 prefixCacheMisses: runtime?.prefixCacheMisses ?? null,
                 prefixCacheEvictions: runtime?.prefixCacheEvictions ?? null,
-              },
+              }),
             },
           }),
         ])
@@ -668,7 +679,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
             service: "model-stats",
             level: "info",
             message: summary.replaceAll("\n", " | "),
-            extra: {
+            extra: recordMetrics(true, {
               sessionID: info.sessionID,
               messageID: info.id,
               modelID: info.modelID,
@@ -700,7 +711,7 @@ export const ModelStats: Plugin = async ({ client, directory, $ }) => {
               prefixCacheHits: runtime?.prefixCacheHits ?? null,
               prefixCacheMaxTokens: runtime?.prefixCacheMaxTokens ?? null,
               prefixCacheMisses: runtime?.prefixCacheMisses ?? null,
-            },
+            }),
           },
         }),
       ])
