@@ -39,9 +39,8 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
   `pack-experts` contiguous artifact a possible experiment again.
 - Fixed 17:35 by `patches/slotstream-0.2.14-stale-pressure.patch` (installed):
   the request path now cross-checks reclaimable memory before refusing on a
-  latched OS pressure level. Still to verify live with a long simulated
-  critical level (`sudo memory_pressure -S -l critical -s 90`) while sending a
-  request.
+  latched OS pressure level. Verified live 17:45: request served during a
+  90 s simulated critical level, with the decision logged.
 - Finding 17:09: a stuck kernel pressure level (left behind by a killed
   `memory_pressure -S`) made Slotstream refuse every request at tokenization
   with 65% memory free. Slotstream trusts `kern.memorystatus_vm_pressure_level`

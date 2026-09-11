@@ -168,6 +168,14 @@ log. Both halves of the patch are therefore verified on the installed binary.
 Still unverified: OpenCode's retry loop itself completing a replay against this
 server (its unit test could not run from the cached checkout, see below).
 
+The stale-pressure patch was verified live at 17:45 CEST with
+`sudo memory_pressure -S -l critical -s 90`: 15 s into the window a short
+request was served (TTFT 4.1 s) while the kernel level was still 4, and the
+server logged `OS level still elevated but 10.7 GB reclaimable (stale threshold
+6.4 GB); treating it as stale and admitting requests`. The request that was
+mid-prefill when the event landed was failed with retryable wording and the
+governor shed cache 32 → 13 experts/layer, as before.
+
 The OpenCode retry unit test could not run from the cached OpenCode checkout
 because its monorepo dependencies were incomplete:
 
