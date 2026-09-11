@@ -131,5 +131,9 @@ you only lose automatic retry after a pressure failure.
   plugin's live count and ETA are estimates. The menu-bar app reads exact
   progress from the server log.
 - Ollama also defaults to port 11434. The setup default of 11435 avoids that.
+- OpenCode names each session by asking the model for a title, which costs a
+  request on the local server. Turn it off with
+  `"agent": { "title": { "disable": true } }` in `opencode.json`, or route it
+  to a cheap model with `"small_model": "provider/model"`.
 - Everything here is MIT licensed. [Slotstream](https://github.com/carloslfu/slotstream)
   and the model have their own licences.

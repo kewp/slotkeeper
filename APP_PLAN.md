@@ -115,7 +115,7 @@ What is worth doing instead, in order:
    turn" into "prefill only the new turn". Planner-level change, moderate
    difficulty, and the biggest usability win available.
 3. **Compaction on the OpenCode side** so sessions stay inside the retained
-   prefix, plus `small_model` so title generation never hits the server.
+   prefix. Title generation is already disabled in `opencode.json`.
 4. **Run `slotstream context-check`** (weights loaded, server stopped, an
    evening slot) at 32K and 65K for exact time, tok/s and peak memory. If a
    131K experiment is still wanted after that, it is a source change plus a

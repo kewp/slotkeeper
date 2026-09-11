@@ -21,7 +21,7 @@ reasoning; this is the state.
   active-request stats, `slotkeeper patch` one-command rebuild, hand-off docs.
 - Next, in order: (1) context sweep on everyday then deep, (2) full-window
   prefix retention in Slotstream (`APP_IMPLEMENTATION.md` C2), (3)
-  `small_model` in OpenCode once Karl names a cheap model, (4) app Stage A
+  done: title generation disabled in OpenCode, (4) app Stage A
   (`APP_IMPLEMENTATION.md`), (5) upstream the two patches
   (`patches/README.md` has the PR text).
 - Karl's preferences: slow is fine, evening/overnight runs are expected, the
@@ -83,8 +83,10 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 - Done later the same day: `caffeinate -s` held by the server on AC (idle
   sleep no longer cuts an evening task), deep profile without a prefill
   deadline, OpenCode context synced on every start.
-- Not yet done: `small_model` for OpenCode title generation (needs Karl to
-  name a cheap model), a warm-cache re-benchmark, the context sweep.
+- Title generation disabled in OpenCode (`"agent": {"title": {"disable":
+  true}}` in `opencode.json`, 18:35); sessions show untitled, the local server
+  no longer pays a request per session. Takes effect after OpenCode restarts.
+- Not yet done: a warm-cache re-benchmark, the context sweep.
 
 ## Plugin Deployment
 
@@ -314,7 +316,9 @@ did surface facts the plans do not yet account for:
 - **Title generation hits the local model.** After the first message in a
   session OpenCode asks the model for a short session name using a separate
   `title` agent. It is cosmetic (it labels the session list) but costs a full
-  request and prefill on this server, competing for the single-flight gate. Point OpenCode's `small_model` at a cheaper provider (or a cloud
+  request and prefill on this server, competing for the single-flight gate.
+  Fix applied: `"agent": {"title": {"disable": true}}` in `opencode.json`.
+  The alternative, `small_model`, routes it to a cheaper model instead. Point OpenCode's `small_model` at a cheaper provider (or a cloud
   model) so the local server only serves real work.
 - The expanded patch (25,402 T0 assertions) is now installed (16:50).
 
