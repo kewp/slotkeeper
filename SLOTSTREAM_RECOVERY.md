@@ -141,9 +141,23 @@ curl --fail http://localhost:11434/api/version
 Additional plugin smoke tests covered the tool-first prefill timer, ETA and
 `/api/show` data, failure diagnostics, and retry-status rendering.
 
-The simulated-pressure drill (`scripts/pressure-drill.sh`, needs sudo for
-`memory_pressure -S`) has not yet been run against the installed build. It is
-the remaining gap in verifying the retry contract end to end.
+The simulated-pressure drill (`scripts/pressure-drill.sh`, sudo for
+`memory_pressure -S -l critical`) was run against the installed build on
+2026-09-11 17:01 CEST while a 1,673-token prompt was in prefill:
+
+```text
+error: insufficient_memory: memory pressure interrupted prefill commit; try your request again after memory becomes available
+request failed: insufficient_memory: ...        (Slotstream stderr, from the patch)
+elastic: memory pressure (warning)  — cache ~43 → ~28 experts/layer
+elastic: memory pressure (critical) — cache ~28 → ~13 experts/layer
+RESULT: request failed with RETRYABLE wording (OpenCode would retry). Contract holds.
+```
+
+The request failed 17.6 s in, before the first token, with the wording
+OpenCode's classifier accepts, and the server-side failure line reached the
+log. Both halves of the patch are therefore verified on the installed binary.
+Still unverified: OpenCode's retry loop itself completing a replay against this
+server (its unit test could not run from the cached checkout, see below).
 
 The OpenCode retry unit test could not run from the cached OpenCode checkout
 because its monorepo dependencies were incomplete:
@@ -226,9 +240,10 @@ scripts/bench.py --label <what changed>
 - Running `slotstream doctor` while the server has the model loaded can fail its
   memory feasibility check with a zero-token maximum. Stop the server before
   using the doctor command for package-integrity verification.
-- Server-side failure logging compiled and passed the full check suite, but the
-  final installation was not deliberately forced into memory pressure merely to
-  generate a production log entry.
+- After the drill the governor stayed at 13 experts/layer for several minutes
+  with pressure back to normal and no requests. Whether regrowth waits for a
+  request boundary or a cooldown is an open question; the monitor's
+  `experts_per_layer` series will answer it.
 
 ## Repository History
 

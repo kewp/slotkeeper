@@ -37,8 +37,13 @@ Updated 2026-09-11 17:00 CEST after the switch to the everyday profile.
 - Ollama remains installed on 11434 and no longer conflicts.
 - Disk free rose from 14 GiB to 82 GiB after cleanup, which makes the
   `pack-experts` contiguous artifact a possible experiment again.
-- Not yet done: the pressure drill against the installed build, the `caffeinate`
-  request-scoped sleep assertion, `small_model` for OpenCode title generation.
+- Pressure drill run 17:01: simulated critical pressure during prefill produced
+  the retryable error and the server-side log line. Retry contract verified.
+  Side observation: with OpenCode closed the cache had grown 19 → 43
+  experts/layer, then fell to 13 under simulated pressure and had not regrown
+  minutes later. Watch the monitor series for regrowth behaviour.
+- Not yet done: the `caffeinate` request-scoped sleep assertion, `small_model`
+  for OpenCode title generation, a warm-cache re-benchmark.
 
 ## Plugin Deployment
 
@@ -284,7 +289,7 @@ Slotstream rebuild and none were applied to the running server.
 | `scripts/install-release.sh` | new release directory, hashes, atomic symlink switch, `--rollback` | used for the 16:50 install |
 | `scripts/monitor.sh` | 30 s JSONL samples of pressure, swap, disk, battery, process, plan and prefix-cache state, with notifications | running in the background (restarted 17:00 for the new port) |
 | `scripts/bench.py` | streaming TTFT/prefill/decode measurements with plan snapshots, tagged by label | one smoke row recorded |
-| `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | written, not run |
+| `scripts/pressure-drill.sh` | simulated pressure during prefill; asserts retryable wording | run 17:01, contract holds |
 | `scripts/install-plugin.sh` | typecheck, copy, hash-verify, SDK version note | written |
 | `SlotstreamBar/` | SwiftUI menu-bar prototype: state, plan, pressure, start/stop/restart, profiles, logs, bundle | builds and runs |
 
