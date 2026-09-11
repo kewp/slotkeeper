@@ -6,6 +6,10 @@ for a local Slotstream model.
 See [SLOTSTREAM_RECOVERY.md](SLOTSTREAM_RECOVERY.md) for the implementation,
 operations, validation, and recovery reference.
 
+See [LOCAL_LLM_ROADMAP.md](LOCAL_LLM_ROADMAP.md) for the reliability roadmap
+and [SLOTSTREAM_DEVELOPMENT.md](SLOTSTREAM_DEVELOPMENT.md) for context changes,
+engine development, future-model support, and the macOS app proposal.
+
 ## Features
 
 - Refreshes an elapsed-time toast every 15 seconds while waiting for first output,

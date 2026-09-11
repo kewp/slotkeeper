@@ -93,6 +93,7 @@ Installed and release artifact SHA-256 values matched:
 | Artifact | SHA-256 |
 | --- | --- |
 | `slotstream` | `78c14d82269f521adab1a8fff1b4da2acaaacfc49713ac5f8eb91ee359e8cce9` |
+| `mlx.metallib` | `198488eb61359e953580a9c4530400feee1a06dd2f28a930a6ffa58aec66a597` |
 | `build-identity.json` | `385ad3992a4bc2d78ad09847e7828fd39aa5a0c23c6bab3272eb0af5547a1ca8` |
 | `build-source.tar.gz` | `12b8c0dce15aa08d07da632e7abff459254fdf252e8ca4f88227fd94e2a0e460` |
 
@@ -112,11 +113,18 @@ Stock backups are retained beside the installed files:
 
 ## Validation Evidence
 
-The final source passed:
+The source used for the currently installed build passed:
 
 ```text
 33 passed, 0 failed, 0 skipped (25401 assertions)
 ```
+
+The maintained patch was subsequently expanded to cover the queued-pressure and
+governor-unavailable pre-output paths. That source passes 25,402 T0 assertions
+and the patch applies forward to clean 0.2.14 source. It has not yet replaced the
+running binary because an active inference run was left undisturbed. Build and
+install it during the next controlled restart, then update the artifact hashes
+in this snapshot.
 
 Commands used:
 
@@ -143,24 +151,39 @@ This does not affect the installed OpenCode package, but it remains a test gap.
 
 ## Rebuild Procedure
 
-Apply the patch to a clean Slotstream 0.2.14 source tree:
+Apply the patch only to a stock Slotstream 0.2.14 source tree. Check the actual
+target first and refuse an already-applied or reversed patch:
 
 ```sh
-patch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+patch --dry-run --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+patch --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
 make checks
 make build
 ```
 
-The patch should first be checked against a separate clean source tree with
-`patch --dry-run -p1`. The release output is under `.build/release/`.
+The installed `build-source.tar.gz` is already patched and must not receive the
+patch again. The release output is under `.build/release/`.
 
-Before replacing an installation, preserve the stock binary and provenance
-files. Install all three matching release artifacts together:
+Install into a new release directory rather than overwriting the active release.
+This keeps the previous complete release available and lets the final symlink
+switch happen atomically. Choose a unique release name:
 
 ```sh
-install -m 755 .build/release/slotstream ~/.slotstream/bin/slotstream
-install -m 644 .build/release/build-identity.json ~/.slotstream/bin/build-identity.json
-install -m 644 .build/release/build-source.tar.gz ~/.slotstream/bin/build-source.tar.gz
+release="$HOME/.slotstream/releases/slotstream-0.2.14-local-$(date +%Y%m%d%H%M%S)"
+mkdir -p "$release"
+install -m 755 .build/release/slotstream "$release/slotstream"
+install -m 644 .build/release/mlx.metallib "$release/mlx.metallib"
+install -m 644 .build/release/build-identity.json "$release/build-identity.json"
+install -m 644 .build/release/build-source.tar.gz "$release/build-source.tar.gz"
+shasum -a 256 "$release/slotstream" "$release/mlx.metallib" "$release/build-identity.json" "$release/build-source.tar.gz"
+```
+
+Stop the existing service after the new directory is complete and verified.
+Then switch the symlink and start the new release:
+
+```sh
+ln -s "$release" "$HOME/.slotstream/bin.next"
+mv -h -f "$HOME/.slotstream/bin.next" "$HOME/.slotstream/bin"
 ```
 
 Restart Slotstream with persistent output:

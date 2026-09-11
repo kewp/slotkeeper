@@ -1,6 +1,13 @@
 --- a/Sources/Slotstream/RequestControl.swift
 +++ b/Sources/Slotstream/RequestControl.swift
-@@ -190,14 +190,18 @@ public final class RequestController: @unchecked Sendable {
+@@ -27,4 +27,6 @@ public struct ContextConfiguration: Sendable, Equatable {
+ public struct RequestFailure: Error, CustomStringConvertible, Codable, Sendable, Equatable {
++    package static let safeRetryAdvice = "try your request again after memory becomes available"
++
+     public enum Code: String, Codable, Sendable {
+         case contextLengthExceeded = "context_length_exceeded"
+         case invalidConfiguration = "invalid_configuration"
+@@ -190,14 +192,18 @@ public final class RequestController: @unchecked Sendable {
          if !connected() { throw fail(RequestFailure(.clientCancelled, "the client disconnected during \(phase)")) }
          let elapsed = elapsedSeconds
          let seconds = configuration.maxPrefillWaitMinutes * 60
@@ -15,7 +22,7 @@
          if pressure() {
 -            throw fail(RequestFailure(.insufficientMemory, "memory pressure interrupted \(phase); retry after memory becomes available"))
 +            let recovery = waitingForFirstToken
-+                ? "try your request again after memory becomes available"
++                ? RequestFailure.safeRetryAdvice
 +                : "retry after memory becomes available"
 +            throw fail(RequestFailure(.insufficientMemory, "memory pressure interrupted \(phase); \(recovery)"))
          }
@@ -23,11 +30,13 @@
              do {
 --- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
 +++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
-@@ -237,6 +237,23 @@ extension Diagnostics {
+@@ -237,6 +237,25 @@ extension Diagnostics {
              let disconnected = RequestController(configuration: reservationPolicy, slackBytes: 0,
                  availableGB: { 1 }, connected: { false })
              let pressured = RequestController(configuration: reservationPolicy, slackBytes: 0,
                  availableGB: { 1 }, pressure: { true })
++            c.equal("safe retry advice matches OpenCode's transient classifier",
++                RequestFailure.safeRetryAdvice, "try your request again after memory becomes available")
 +            do {
 +                try pressured.check(phase: "prefill commit")
 +                c.expect("pre-output pressure must refuse", false)
@@ -48,6 +57,45 @@
              for (control, code) in [(expired, RequestFailure.Code.prefillDeadlineExceeded),
                                       (disconnected, .clientCancelled), (pressured, .insufficientMemory)] {
                  do {
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+ContextServing.swift
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+ContextServing.swift
+@@ -133,6 +133,10 @@ extension Diagnostics {
+                     let code = mode.hasPrefix("deadline") ? "prefill_deadline_exceeded" : "insufficient_memory"
+                     c.expect("\(label): correct header status", response.head.hasPrefix(after && stream ? "HTTP/1.1 200" : "HTTP/1.1 503"), response.head)
+                     c.expect("\(label): typed terminal", response.body.contains(code), response.body)
++                    if mode == "pressure-before" {
++                        c.expect("\(label): safe queued pressure advertises retry",
++                            response.body.contains("try your request again"), response.body)
++                    }
+                     c.equal("\(label): model only runs after admission", fired, after)
+                     c.expect("\(label): no success DONE", !response.body.contains("[DONE]"))
+                     let lines = response.body.split(separator: "\n").map(String.init)
+--- a/Sources/Slotstream/Engine.swift
++++ b/Sources/Slotstream/Engine.swift
+@@ -895,8 +895,8 @@ public final class Engine {
+             var stats = GenStats()
+             stats.promptTokens = promptIds.count
+             stats.memoryPressureCancelled = true
+-            let failure = control.fail(RequestFailure(.insufficientMemory,
+-                "memory pressure interrupted inference; retry after the cache resizes"))
++            let failure = control.fail(RequestFailure(.insufficientMemory,
++                "memory pressure interrupted inference; \(RequestFailure.safeRetryAdvice)"))
+             stats.requestFailure = failure; stats.runtimeError = failure.message
+             stats.finishReason = "error"
+             stats.memoryPressureBoundarySeconds = RuntimeClock.seconds(since: ticket.requestedAt)
+--- a/Sources/Slotstream/Governor.swift
++++ b/Sources/Slotstream/Governor.swift
+@@ -318,8 +318,8 @@ public final class MemoryGovernor: @unchecked Sendable {
+         // a decision sampled before the lock would spend that reservation.
+         let applyDecision = {
+             guard let i = self.inputs(pressure: pressure) else { return }
+-            self.engine.setAllocationUnavailable(GovernorPolicy.desiredPlan(i) == nil
+-                ? RequestFailure(.insufficientMemory, "the configured context no longer fits current availability; retry after memory recovers") : nil)
++            self.engine.setAllocationUnavailable(GovernorPolicy.desiredPlan(i) == nil
++                ? RequestFailure(.insufficientMemory, "the configured context no longer fits current availability; \(RequestFailure.safeRetryAdvice)") : nil)
+             if pressure != nil {
+                 // Even at the arena floor there can be inexpensive memory to
+                 // return. No live reader exists while this gate is held.
 --- a/Sources/Slotstream/Server.swift
 +++ b/Sources/Slotstream/Server.swift
 @@ -36,6 +36,7 @@ public final class Server {
