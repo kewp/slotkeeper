@@ -21,3 +21,84 @@
          }
          if let pool = lock.withLock({ reservations }) {
              do {
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+@@ -237,6 +237,23 @@ extension Diagnostics {
+             let disconnected = RequestController(configuration: reservationPolicy, slackBytes: 0,
+                 availableGB: { 1 }, connected: { false })
+             let pressured = RequestController(configuration: reservationPolicy, slackBytes: 0,
+                 availableGB: { 1 }, pressure: { true })
++            do {
++                try pressured.check(phase: "prefill commit")
++                c.expect("pre-output pressure must refuse", false)
++            } catch let error as RequestFailure {
++                c.expect("pre-output pressure advertises a safe retry",
++                    error.message.contains("try your request again"))
++            }
++            let pressuredAfterOutput = RequestController(configuration: reservationPolicy, slackBytes: 0,
++                availableGB: { 1 }, pressure: { true })
++            pressuredAfterOutput.sampledFirstToken()
++            do {
++                try pressuredAfterOutput.check(phase: "decode commit")
++                c.expect("post-output pressure must refuse", false)
++            } catch let error as RequestFailure {
++                c.expect("post-output pressure does not advertise an automatic retry",
++                    !error.message.contains("try your request again"))
++            }
+             for (control, code) in [(expired, RequestFailure.Code.prefillDeadlineExceeded),
+                                      (disconnected, .clientCancelled), (pressured, .insufficientMemory)] {
+                 do {
+--- a/Sources/Slotstream/Server.swift
++++ b/Sources/Slotstream/Server.swift
+@@ -36,6 +36,7 @@ public final class Server {
+         let failure = error as? RequestFailure
+             ?? RequestFailure(.invalidConfiguration, String(describing: error))
+         guard failure.code != .clientCancelled else { return }
++        logRequestFailure(failure)
+         let body: [String: Any]
+         if dialect == "ollama" {
+             body = ["error": failure.message, "code": failure.code.rawValue, "details": failure.json]
+@@ -47,6 +48,12 @@ public final class Server {
+         respondJSON(fd, body, status: failure.httpStatus, cors: cors)
+     }
+-
++
++    private func logRequestFailure(_ failure: RequestFailure) {
++        guard failure.code != .clientCancelled else { return }
++        FileHandle.standardError.write(
++            "request failed: \(failure.code.rawValue): \(failure.message)\n".data(using: .utf8)!)
++    }
++
+     public init(engine: Engine, port: UInt16, weightsBytes: Int = 0, listenFD: Int32 = -1) {
+         self.engine = engine
+         self.port = port
+@@ -999,6 +1006,7 @@ public final class Server {
+         if let error = stats.runtimeError {
+             let failure: [String: Any] = ["error": error, "code": stats.requestFailure?.code.rawValue ?? "inference_error"]
+             if headersStarted {
++                logRequestFailure(stats.requestFailure ?? RequestFailure(.inferenceError, error))
+                 if alive { writeChunk((try! JSONSerialization.data(withJSONObject: failure)) + Data("\n".utf8)) }
+                 endOutput()
+             } else if alive { requestRefusal(fd, stats.requestFailure ?? RequestFailure(.inferenceError, error), dialect: "ollama", cors: cors) }
+@@ -1210,6 +1218,7 @@ public final class Server {
+         if let error = stats.runtimeError {
+             let failure: [String: Any] = ["error": error, "code": stats.requestFailure?.code.rawValue ?? "inference_error"]
+             if headersStarted {
++                logRequestFailure(stats.requestFailure ?? RequestFailure(.inferenceError, error))
+                 if alive { writeChunk((try! JSONSerialization.data(withJSONObject: failure)) + Data("\n".utf8)) }
+                 endOutput()
+             } else if alive { requestRefusal(fd, stats.requestFailure ?? RequestFailure(.inferenceError, error), dialect: "ollama", cors: cors) }
+@@ -1456,5 +1465,6 @@ public final class Server {
+         if let error = stats.runtimeError {
+             if headersStarted {
++                logRequestFailure(stats.requestFailure ?? RequestFailure(.inferenceError, error))
+                 emit(GatewayDialect.frame(["type": "error", "error": stats.requestFailure?.json
+                     ?? ["message": error, "type": "inference_error"]]))
+                 endOutput()
+@@ -1632,6 +1642,7 @@ public final class Server {
+         if let error = stats.runtimeError {
+             if headersStarted {
++                logRequestFailure(stats.requestFailure ?? RequestFailure(.inferenceError, error))
+                 emit(["error": stats.requestFailure?.json ?? RequestFailure(.inferenceError, error).json])
+                 endOutput()
+             } else { requestRefusal(fd, stats.requestFailure ?? RequestFailure(.inferenceError, error), dialect: "openai", cors: cors) }

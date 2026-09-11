@@ -3,6 +3,9 @@
 An OpenCode plugin that shows live prefill timing and detailed completion stats
 for a local Slotstream model.
 
+See [SLOTSTREAM_RECOVERY.md](SLOTSTREAM_RECOVERY.md) for the implementation,
+operations, validation, and recovery reference.
+
 ## Features
 
 - Refreshes an elapsed-time toast every 15 seconds while waiting for first output,
@@ -39,7 +42,8 @@ does not match OpenCode's retry classification, so the retry loop is not entered
 `patches/slotstream-0.2.14-opencode-retry.patch` fixes that integration contract.
 It advertises automatic retry only when pressure interrupts inference before the
 first model token. Pressure after output begins remains non-retryable, preventing
-duplicate text or tool side effects.
+duplicate text or tool side effects. It also records non-cancellation request
+failures on Slotstream's standard error stream.
 
 ## Install
 
