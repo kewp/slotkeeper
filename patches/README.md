@@ -1,16 +1,18 @@
 # Slotstream patches
 
-Three patches against [Slotstream](https://github.com/carloslfu/slotstream)
+Four patches against [Slotstream](https://github.com/carloslfu/slotstream)
 0.2.14 source. Apply in this order (alphabetical, which is what
 `scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
-candidate for an upstream pull request. All three pass Slotstream's T0
-check suite (`make checks`, 34 checks, 25,425 assertions) with the new
-checks included.
+candidate for an upstream pull request. All four apply cleanly to a stock
+0.2.14 tree in that order (verified 2026-09-11). The first three pass
+Slotstream's T0 check suite (`make checks`, 34 checks, 25,425 assertions)
+with the new checks included; see Status for the fourth.
 
 | Patch | What it changes | New check |
 | --- | --- | --- |
 | `slotstream-0.2.14-opencode-retry.patch` | Pre-output memory-pressure failures say `try your request again`, which OpenCode's retry classifier recognises; post-output failures keep the non-retryable wording so a replay cannot duplicate text or tool effects. Non-cancellation request failures are logged to stderr. | assertions added to `context-serving` (queued-pressure and governor-unavailable pre-output paths) |
 | `slotstream-0.2.14-prefix-retention.patch` | `serve --prefix-cache-tokens <n\|full>` (or `SLOTSTREAM_PREFIX_CACHE_TOKENS`) sets how much conversation state the prefix cache may retain. The planner caps it at the context window, charges it against the expert pool before sizing experts, refuses at startup if the pool would fall below its floor, and reports it in `/api/show` as `runtime_prefix_cache_tokens`. The governor keeps the explicit ceiling across resizes. | assertions added to `prefix-client-capacity` (window cap, pool charge, peak unchanged, `--no-prefix-cache` precedence, invalid values, governor shed, refusal at the floor) |
+| `slotstream-0.2.14-pressure-ceiling.patch` | After an OS pressure event the elastic governor remembers the pool that met it, and for 20 minutes will not regrow past 1 GB below it. Repeated events ratchet the ceiling down; an availability shrink is never blocked; the ceiling is forgotten after the window. | assertions added to `governor-check` (regrowth capped, reason string, cooldown still applies, forgotten after the window, no effect when above the replan, dead-band respected, shrink unaffected, ratchet) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
 
 ## Apply and build
@@ -31,7 +33,7 @@ Manually:
 ```sh
 tar -xzf build-source.tar.gz            # or a stock 0.2.14 checkout
 cd <source>
-for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-prefix-retention slotstream-0.2.14-stale-pressure; do
+for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-prefix-retention slotstream-0.2.14-pressure-ceiling slotstream-0.2.14-stale-pressure; do
   patch --dry-run --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
   patch --forward --batch -p1 < ~/slotkeeper/patches/$p.patch
 done
@@ -83,6 +85,15 @@ is refused before the model loads. Use it with
 `SLOTSTREAM_PREFIX_CACHE_TOKENS=full` in `~/.slotstream/ctl.env`; the
 exerciser's `multi-turn-long` task (20K-token conversation, turn-2 TTFT must
 be at most half of turn-1) is the qualification.
+
+**Pressure ceiling.** The governor grows when idle availability says a
+fresh start would pick a bigger pool, after 60 seconds of calm. Idle
+availability cannot see the several GB a long prefill needs, so on
+2026-09-11 it regrew 30 to 62 and 35 to 56 experts per layer right after
+pressure shrinks, and the next 8K and 24K prefills failed at prefill commit
+both times. Decode speed barely depends on the pool in that range (3.05
+tok/s median at 25 per layer, 3.42 at 43), so holding a smaller pool for a
+while after pressure is cheap and removes the oscillation.
 
 ## Upstream pull request text
 
@@ -154,6 +165,28 @@ be at most half of turn-1) is the qualification.
 > expected peak does not rise, an explicit count is honoured, disabled
 > retention wins, invalid values are refused, the governor keeps the ceiling
 > on a shed, and full at the floor plan is refused.
+
+### PR 4: Do not regrow straight back to a pool that just met memory pressure
+
+> After an OS pressure event the governor sheds a chunk of the expert pool,
+> then regrows as soon as 60 seconds pass and idle availability allows it.
+> Availability sampled between requests does not include the transient
+> memory of the next long prefill, so the pool can grow back past the size
+> that just triggered pressure, and the next long prompt fails with a
+> pressure interruption at prefill commit. On a 24 GB M4 Pro this happened
+> twice in one 20-minute sweep (30 to 62 and 35 to 56 experts per layer).
+>
+> This remembers the pool that was live when the last pressure event fired.
+> For 20 minutes (`GovernorPolicy.pressureMemory`) growth may not exceed 1 GB
+> below it; repeated events ratchet the ceiling down; after the window it is
+> forgotten and the plain replan resumes. Shrinking on availability is
+> unaffected, and the grow dead-band still applies to the capped target. The
+> resize reason says when growth was capped.
+>
+> Tests: assertions added to `governor-check` covering the capped regrowth,
+> its reason string, the unchanged cooldown, expiry, a ceiling above the
+> replan, the dead-band, an availability shrink with a ceiling set, and the
+> ratchet.
 
 ## Status
 

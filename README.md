@@ -99,9 +99,11 @@ Stock Slotstream reports memory-pressure interruptions with wording that
 OpenCode's retry loop does not recognise, it trusts the OS pressure level
 alone, which can stay elevated after the pressure is gone, and it retains
 only a tenth of the pool budget as conversation state, so on a small Mac a
-long coding session re-prefills its whole history every turn. Three patches
-against 0.2.14 source fix that; all three pass Slotstream's own T0 check
-suite plus new checks. None is needed for anything else here.
+long coding session re-prefills its whole history every turn. Its elastic
+cache also regrows straight back to a size that just met memory pressure,
+which fails the next long prompt. Four patches against 0.2.14 source fix
+that, each with new assertions in Slotstream's own T0 check suite. None is
+needed for anything else here.
 One command does it, about five minutes with Xcode or the Command Line Tools
 installed:
 

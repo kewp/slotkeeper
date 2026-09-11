@@ -1,0 +1,175 @@
+diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swift
+--- a/Sources/Slotstream/Governor.swift	2026-09-11 18:52:39
++++ b/Sources/Slotstream/Governor.swift	2026-09-11 21:53:59
+@@ -17,7 +17,10 @@
+ //   - OS pressure events (warning/critical): the OS's own compressor/swap
+ //     view. Shed an absolute chunk immediately (warning: ≥2 GB / 15%,
+ //     critical: ≥4 GB / 50%); repeated events keep shedding. Growth waits for
+-//     60 s of calm after any event.
++//     60 s of calm after any event, and for `pressureMemory` (20 min) after
++//     one it may not regrow past 1 GB below the pool that met the pressure:
++//     idle availability cannot see the transient a long prefill needs, so the
++//     plain replan grew straight back to a pool that had just failed.
+ //   - elastic applies to auto-sized pools only: an explicit knob is the user's
+ //     stated intent and is never resized (same principle as the startup clamp).
+ //
+@@ -57,6 +60,9 @@
+         public var secondsSinceResize: Double?
+         /// Set when this tick is an OS pressure event rather than a poll.
+         public var pressure: Pressure?
++        /// The pool that was live when the last OS pressure event fired (the
++        /// lowest one while events keep coming within `pressureMemory`).
++        public var pressureCeilingSlots: Int?
+ 
+         public init(
+             currentSlots: Int, availableGB: Double, ramGB: Double, workingSetGB: Double,
+@@ -67,7 +73,8 @@
+             visionResidentReserved: Bool = false,
+             maxContextTokens: Int = ContextPolicy.defaultTokens,
+             runtimeAllocationPolicy: RuntimeAllocationPolicy? = nil,
+-            ownedAdditionalBytes: Int = 0, contextQualification: Bool = false
++            ownedAdditionalBytes: Int = 0, contextQualification: Bool = false,
++            pressureCeilingSlots: Int? = nil
+         ) {
+             self.ramPercent = ramPercent
+             self.currentSlots = currentSlots
+@@ -84,6 +91,7 @@
+             self.runtimeAllocationPolicy = runtimeAllocationPolicy
+             self.ownedAdditionalBytes = max(0, ownedAdditionalBytes)
+             self.contextQualification = contextQualification
++            self.pressureCeilingSlots = pressureCeilingSlots
+         }
+     }
+ 
+@@ -95,7 +103,27 @@
+     public static let growCooldown: TimeInterval = 60
+     static let shrinkDeadbandGB = 1.0
+     static let growDeadbandGB = 2.0
++    /// How long a pressure event bounds growth. Measured 2026-09-11 on a 24 GB
++    /// M4 Pro: the 60 s cooldown alone regrew 30 → 62 and 35 → 56 experts per
++    /// layer right after pressure shrinks, and the next long prefill failed
++    /// with a pressure interruption both times.
++    public static let pressureMemory: TimeInterval = 1200
+ 
++    /// The ceiling to remember after an event with `live` slots in the pool:
++    /// the lower of that and a still-remembered earlier ceiling, so repeated
++    /// events ratchet it down rather than resetting it upwards.
++    public static func pressureCeiling(previous: Int?, secondsSincePrevious: Double?, live: Int) -> Int {
++        if let p = previous, let s = secondsSincePrevious, s < pressureMemory { return min(p, live) }
++        return live
++    }
++
++    /// Largest pool growth may reach while a pressure event is remembered.
++    static func growthLimit(_ i: Inputs) -> Int? {
++        guard let ceiling = i.pressureCeilingSlots, let since = i.secondsSincePressure,
++              since < pressureMemory else { return nil }
++        return ceiling - Int((shrinkDeadbandGB * 1e9 / Geometry.recordBytes).rounded(.up))
++    }
++
+     private static func settle(_ target: Int, _ current: Int, _ reason: String) -> Decision {
+         let t = max(Geometry.floorSlots, min(target, Geometry.totalRecords))
+         return t == current ? .hold : .resize(slots: t, reason: reason)
+@@ -186,7 +214,14 @@
+         if desiredGB >= curGB + growDeadbandGB {
+             let calm = i.secondsSincePressure.map { $0 > growCooldown } ?? true
+             let cooled = i.secondsSinceResize.map { $0 > growCooldown } ?? true
+-            if calm, cooled { return settle(d, i.currentSlots, "memory freed") }
++            guard calm, cooled else { return .hold }
++            if let limit = growthLimit(i), limit < d {
++                // Grow only as far as the remembered ceiling allows, and only
++                // if that is still worth a resize.
++                guard Geometry.gb(limit) >= curGB + growDeadbandGB else { return .hold }
++                return settle(limit, i.currentSlots, "memory freed, capped below the pool that met pressure")
++            }
++            return settle(d, i.currentSlots, "memory freed")
+         }
+         return .hold
+     }
+@@ -200,6 +235,7 @@
+     private var timer: DispatchSourceTimer?
+     private var lastPressureAt: Date? = nil
+     private var lastResizeAt: Date? = nil
++    private var pressureCeilingSlots: Int? = nil
+ 
+     // policy constants — dead-bands are absolute GB, not relative: the
+     // feasibility replan converges in one step, and a relative trigger can
+@@ -289,14 +325,24 @@
+             maxContextTokens: cur.maxContextTokens,
+             runtimeAllocationPolicy: cur.runtimeAllocationPolicy,
+             ownedAdditionalBytes: engine.prefixCache.ownedAdditionalBytes(mtpResident: cur.mtpEnabled),
+-            contextQualification: cur.contextQualification)
++            contextQualification: cur.contextQualification,
++            pressureCeilingSlots: pressureCeilingSlots)
+     }
+ 
++    /// Record an OS pressure event: when, and the pool it met.
++    private func notePressure() {
++        let now = Date()
++        pressureCeilingSlots = GovernorPolicy.pressureCeiling(previous: pressureCeilingSlots,
++            secondsSincePrevious: lastPressureAt.map { now.timeIntervalSince($0) },
++            live: engine.model.pool.slots)
++        lastPressureAt = now
++    }
++
+     /// OS pressure events see what availability math cannot: compressor and
+     /// swap strain from system-wide overcommit. Shed an absolute chunk —
+     /// repeated events keep shedding until the pressure stops.
+     private func onPressure(critical: Bool) {
+-        lastPressureAt = Date()
++        notePressure()
+         act(critical ? .critical : .warning)
+     }
+ 
+@@ -316,7 +362,7 @@
+     /// inducing OS pressure or inventing additional available memory.
+     package func pressureNow(_ pressure: GovernorPolicy.Pressure, requested: (() -> Void)? = nil) {
+         onQueue {
+-            lastPressureAt = Date()
++            notePressure()
+             act(pressure, requested: requested)
+         }
+     }
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-11 16:44:16
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-11 21:53:59
+@@ -157,6 +157,40 @@
+         c.expect("unavailable budget cannot silently unload a resident head",
+             P.desiredPlan(starved) == nil || P.desiredPlan(starved)?.mtpEnabled == true)
+ 
++        // Pressure ceiling: after an event at `met` slots and a shed, a fully
++        // recovered machine may not regrow past 1 GB below `met` for
++        // pressureMemory, which the plain replan did within 60 s.
++        let oneGB = Int((1e9 / Geometry.recordBytes).rounded(.up))
++        let met = steady
++        let shed = Geometry.slotsForPoolGB(Geometry.gb(steady) - 8)
++        let recovered = steadyAvail + Geometry.gb(steady) - Geometry.gb(shed)
++        func grown(_ ceiling: Int?, since: Double) -> P.Decision {
++            var i = inputs(slots: shed, avail: recovered, sincePressure: since, sinceResize: since)
++            i.pressureCeilingSlots = ceiling
++            return P.decide(i)
++        }
++        let baseline = grown(nil, since: 120)
++        c.expect("fixture: without a ceiling the replan regrows past the pool that met pressure",
++            (slots(baseline) ?? 0) > met - oneGB, "got \(baseline)")
++        let capped = grown(met, since: 120)
++        c.expect("ceiling: regrowth stops 1 GB below the pool that met pressure",
++            (slots(capped) ?? Int.max) <= met - oneGB && (slots(capped) ?? 0) > shed, "got \(capped)")
++        c.equal("ceiling: says why", reason(capped), "memory freed, capped below the pool that met pressure")
++        c.equal("ceiling: still waits out the 60 s cooldown", grown(met, since: 30), .hold)
++        c.equal("ceiling: forgotten after pressureMemory", slots(grown(met, since: P.pressureMemory + 1)), slots(baseline))
++        c.equal("ceiling: above the replan has no effect", slots(grown(Geometry.totalRecords, since: 120)), slots(baseline))
++        let near = Geometry.slotsForPoolGB(Geometry.gb(shed) + 2.5)
++        c.equal("ceiling: growth smaller than the dead-band holds", grown(near, since: 120), .hold)
++        var falling = inputs(slots: shed, avail: 2.0, sincePressure: 120, sinceResize: 120)
++        falling.pressureCeilingSlots = shed
++        c.expect("ceiling: never blocks an availability shrink", (slots(P.decide(falling)) ?? shed) < shed,
++            "got \(P.decide(falling))")
++        c.equal("ceiling: first event records the live pool",
++            P.pressureCeiling(previous: nil, secondsSincePrevious: nil, live: 900), 900)
++        c.equal("ceiling: repeated events ratchet down",
++            P.pressureCeiling(previous: 800, secondsSincePrevious: 60, live: 900), 800)
++        c.equal("ceiling: a stale ceiling is replaced",
++            P.pressureCeiling(previous: 800, secondsSincePrevious: P.pressureMemory + 1, live: 900), 900)
+         return c.report()
+     }
+ }
