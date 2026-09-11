@@ -1,7 +1,7 @@
 # Slotkeeper
 
 Keep a local LLM running on a MacBook, keep the Mac usable, and see what the
-model is doing. Built around [Slotstream](#what-you-need) serving
+model is doing. Built around [Slotstream](https://github.com/carloslfu/slotstream) serving
 Qwen3.8-Flash-Next on Apple Silicon and [OpenCode](https://opencode.ai) as
 the client.
 
@@ -33,8 +33,9 @@ OpenCode 1.18.30. Expect rough edges elsewhere and read the traps in
 ## What you need
 
 - macOS 14 or later on Apple Silicon.
-- Slotstream installed at `~/.slotstream/bin/slotstream` with the model pulled
-  (`slotstream pull`). Follow Slotstream's own documentation for that.
+- [Slotstream](https://github.com/carloslfu/slotstream) installed at
+  `~/.slotstream/bin/slotstream` with the model pulled (`slotstream pull`).
+  Follow its README for that.
 - OpenCode.
 - `python3` (3.9+), `jq`, Node.js and npm. `brew install jq node` covers the
   missing ones.
@@ -122,4 +123,5 @@ you only lose automatic retry after a pressure failure.
   plugin's live count and ETA are estimates. The menu-bar app reads exact
   progress from the server log.
 - Ollama also defaults to port 11434. The setup default of 11435 avoids that.
-- Everything is MIT licensed. Slotstream and the model have their own licences.
+- Everything here is MIT licensed. [Slotstream](https://github.com/carloslfu/slotstream)
+  and the model have their own licences.
