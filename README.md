@@ -1,117 +1,123 @@
-# OpenCode Model Stats
+# OpenCode Model Stats + Slotstream Ops
 
-An OpenCode plugin that shows live prefill timing and detailed completion stats
-for a local Slotstream model.
+Run a local LLM on a MacBook, keep it running, keep the Mac usable, and see
+what it is doing. Built around [Slotstream](#what-you-need) serving
+Qwen3.8-Flash-Next on Apple Silicon and [OpenCode](https://opencode.ai) as
+the client.
 
-See [SLOTSTREAM_RECOVERY.md](SLOTSTREAM_RECOVERY.md) for the implementation,
-operations, validation, and recovery reference.
+What you get:
 
-See [LOCAL_LLM_ROADMAP.md](LOCAL_LLM_ROADMAP.md) for the reliability roadmap,
-[SLOTSTREAM_DEVELOPMENT.md](SLOTSTREAM_DEVELOPMENT.md) for context changes,
-engine development, and future-model support, [APP_PLAN.md](APP_PLAN.md)
-for the full-app plan and the analysis of context windows beyond 65K, and
-[APP_IMPLEMENTATION.md](APP_IMPLEMENTATION.md) for the hand-off guide: data
-contracts, code map, staged tasks, verification, traps.
+- **OpenCode plugin** (`model-stats.ts`): a live toast while the model reads
+  your prompt, then a full report: tokens, cache hit rate, time to first
+  token, prefill and decode rates, memory plan, and clear failure diagnostics.
+- **Server supervision** (`scripts/slotstream-ctl.sh`): start at login,
+  restart after a crash, named context profiles, port-conflict and disk checks,
+  log rotation, support bundle, release install with rollback.
+- **Menu-bar app** (`SlotstreamBar/`): state, memory pressure, expert cache,
+  the request in flight with prefill progress, the background tests, and a
+  dashboard window with charts.
+- **Continuous exerciser** (`scripts/exerciser.py`): a rotating suite of
+  realistic and adversarial tasks that measures cost and behaviour around the
+  clock, yields to your own requests and to battery, and can be paused from
+  the menu bar.
+- **Metrics and reports**: 30-second system samples, per-request rows, and a
+  one-command summary.
+- **Slotstream patches** (`patches/`): make memory-pressure failures
+  retryable by OpenCode, and stop a stale OS pressure level from refusing
+  requests. Optional; everything else works on stock Slotstream.
 
-## Features
+Tested on one machine: a 24 GB M4 Pro MacBook, macOS 26, Slotstream 0.2.14,
+OpenCode 1.18.30. Expect rough edges elsewhere and read the traps in
+`APP_IMPLEMENTATION.md`.
 
-- Refreshes an elapsed-time toast every 15 seconds while waiting for first output,
-  and stops it as soon as text, reasoning, or a tool call begins streaming.
-- Estimates the current prompt size from the latest completed request and shows
-  a cache-miss ETA using Slotstream's planned prefill rate and chunk size.
-- Keeps the completed report visible for 24 hours.
-- Reports prompt, cached, cache-write, output, and reasoning tokens.
-- Reports context usage, prompt headroom, prompt growth, cache hit rate, TTFT,
-  prefill rate, decode rate, end-to-end rate, finish reason, and total time.
-- Reads Slotstream's Ollama-compatible `/api/ps` and `/api/show` endpoints for
-  process resident memory, device working set, planned peak, expert residency,
-  live prefix-cache counters, and planned inference rates.
-- Turns failed requests into persistent diagnostic reports with the provider
-  error, elapsed time, Slotstream plan/cache state, and a post-failure macOS
-  memory-pressure, availability, and swap snapshot.
-- Shows OpenCode's retry attempt and countdown for transient Slotstream errors.
-- Writes the complete structured record to OpenCode's normal log through
-  `client.app.log()`.
+## What you need
 
-The OpenAI-compatible streaming protocol does not report prefill token progress,
-and `/api/show` does not expose the active request's reused-prefix length. The
-live prompt count and cache-miss ETA are therefore labeled as estimates; they do
-not claim an exact percentage or account for a cache hit. Slotstream's own
-terminal remains the only source for exact active prefill progress. TTFT and the
-observed prefill rate become available when the first output arrives.
+- macOS 14 or later on Apple Silicon.
+- Slotstream installed at `~/.slotstream/bin/slotstream` with the model pulled
+  (`slotstream pull`). Follow Slotstream's own documentation for that.
+- OpenCode.
+- `python3` (3.9+), `jq`, Node.js and npm. `brew install jq node` covers the
+  missing ones.
+- Xcode or the Command Line Tools if you want the menu-bar app (`swift`).
 
-## Automatic recovery
-
-OpenCode 1.18.30 already retries transient provider failures up to five times
-with exponential backoff. Slotstream 0.2.14's streamed memory-pressure message
-does not match OpenCode's retry classification, so the retry loop is not entered.
-
-`patches/slotstream-0.2.14-opencode-retry.patch` fixes that integration contract.
-It advertises automatic retry only when pressure interrupts inference before the
-first model token. Pressure after output begins remains non-retryable, preventing
-duplicate text or tool side effects. It also records non-cancellation request
-failures on Slotstream's standard error stream.
-
-## Install
+## Quick start
 
 ```sh
-cp model-stats.ts ~/.config/opencode/plugins/model-stats.ts
+git clone https://github.com/kewp/opencode-model-stats ~/opencode-model-stats
+cd ~/opencode-model-stats
+scripts/setup.sh
 ```
 
-Restart OpenCode after installing or updating the plugin.
+The setup script checks the requirements, asks for a port and a default
+profile, installs the plugin, prints the provider block to put in
+`~/.config/opencode/opencode.json`, and offers to install the background
+services. `scripts/setup.sh --yes` takes the defaults. Restart OpenCode
+afterwards and pick the `slotstream` provider.
 
-The default provider id is `slotstream`. Change `PROVIDER_ID` at the top of
-`model-stats.ts` if your OpenCode provider uses another id. Toast durations and
-the live refresh interval are configured beside it.
-
-## Operations tooling
-
-Alongside the plugin, the repo carries the scripts used to run Slotstream as a
-continuous local service. None of them need a Slotstream rebuild.
+Everyday commands:
 
 ```sh
-scripts/slotstream-ctl.sh status          # process, port owner, plan, cache, pressure, profile mismatch
-scripts/slotstream-ctl.sh start everyday  # 32K window; also: conservative (16K), deep (65K), or a number
-scripts/slotstream-ctl.sh install-agent   # LaunchAgent: restart on crash, log capture
-scripts/slotstream-ctl.sh monitor start   # 30 s JSONL samples to ~/.slotstream/metrics/ (LaunchAgent)
-scripts/slotstream-ctl.sh exerciser start # continuous task suite (LaunchAgent); pause/resume/status/report
-scripts/report.py --hours 24              # what the exerciser, bench and monitor recorded
-scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # context sweep
-scripts/bench.py --label 32k              # one-off TTFT / prefill / decode measurements
-scripts/pressure-drill.sh                 # simulated memory pressure during prefill; checks retry wording
-scripts/install-plugin.sh                 # standalone plugin copy (or --link for the repo shim)
+scripts/slotstream-ctl.sh status            # process, port, plan, cache, pressure, profile
+scripts/slotstream-ctl.sh restart deep      # 65K window for a long session; 'restart everyday' for 32K
+scripts/slotstream-ctl.sh exerciser status  # background suite; also pause / resume / report
+scripts/slotstream-ctl.sh logs 100
+scripts/report.py --hours 24                # what has been measured
+scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # TTFT by prompt size
+scripts/bench.py --label mytest             # one-off measurement
+scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)
+scripts/slotstream-ctl.sh bundle            # support bundle for bug reports
 ```
 
-`SlotstreamBar/` is a SwiftUI menu-bar prototype that supervises the server
-through the control script and shows the exerciser's progress with a pause
-button for battery: `cd SlotstreamBar && swift run`.
+`scripts/slotstream-ctl.sh` with no arguments lists everything.
 
-### Exerciser
+## How the pieces fit
 
-`scripts/exerciser.py` runs a rotating suite against the server in the
-background: short chat, code review of a random repo file, three-turn
-conversation (checks prefix reuse), tool call, JSON answer, codebase summaries at
-8K/16K/24K tokens, a 1,500-token generation, an over-window prompt (must be
-refused cleanly), a client cancel mid-prefill (server must recover), and two
-simultaneous requests (queueing). Every run records latency, tokens, server CPU
-and RSS peaks, pressure, battery and the plan before and after, to
-`~/.slotstream/metrics/exerciser.jsonl`.
-
-It yields to real work: it waits while `~/.slotstream/opencode-active` is fresh
-(the plugin writes it during requests), while on battery, while memory pressure
-is critical, and while `~/.slotstream/exerciser.pause` exists (the menu-bar
-Pause button). Point it at more code with `EXERCISER_REPOS=/path/a:/path/b` in
-`~/.slotstream/ctl.env`.
-
-## Development
-
-```sh
-npm install
-npm run typecheck
+```text
+OpenCode ──plugin──▶ toasts + log records + ~/.slotstream/opencode-active
+   │
+   ▼  http://localhost:<port>/v1
+Slotstream server  ◀── slotstream-ctl.sh (launchd, profiles, caffeinate on AC)
+   ▲        │
+   │        └── /api/ps, /api/show ──▶ monitor.sh (30 s samples) ─┐
+   │                                                             ▼
+exerciser.py (tasks, yields to OpenCode/battery/pressure) ──▶ ~/.slotstream/metrics/*.jsonl
+                                                                 │
+SlotstreamBar (menu bar + dashboard) ◀───────────────────────────┘
 ```
+
+Profiles set the context window and are kept in `~/.slotstream/profile`:
+everyday 32,768, conservative 16,384, deep 65,536. Every start rewrites the
+OpenCode provider's port and `limit.context` to match, so the two cannot
+drift. Settings shared by all tools live in `~/.slotstream/ctl.env`.
+
+## Slotstream patches (optional)
+
+Stock Slotstream reports memory-pressure interruptions with wording that
+OpenCode's retry loop does not recognise, and it trusts the OS pressure level
+alone, which can stay elevated after the pressure is gone. Two patches against
+0.2.14 source fix that; both pass Slotstream's own T0 check suite plus new
+checks. Applying them means building Slotstream yourself; the procedure,
+including the release-directory install and rollback, is in
+`SLOTSTREAM_RECOVERY.md`. If you do not, everything else here still works;
+you only lose automatic retry after a pressure failure.
+
+## Documents
+
+| File | What it is |
+| --- | --- |
+| `APP_PLAN.md` | Where this is going, and why context windows beyond 65K are the wrong lever on a 24 GB Mac |
+| `APP_IMPLEMENTATION.md` | Hand-off guide: data formats, code map, staged tasks with verification, known traps |
+| `LOCAL_LLM_ROADMAP.md` | Reliability roadmap, review of the plan against the live machine, ideas |
+| `SLOTSTREAM_DEVELOPMENT.md` | How Slotstream is built, what is hard to change, how to patch and ship it |
+| `SLOTSTREAM_RECOVERY.md` | The author's installed build, validation evidence, rebuild and rollback procedure |
+| `CLAUDE.md` | Operating rules for AI assistants working in this repo |
 
 ## Notes
 
-OpenCode's TUI has one toast slot. The 24-hour report remains visible while the
-TUI is open, but a later OpenCode or plugin toast can replace it. The structured
-log record remains available after the toast is replaced.
+- OpenCode's TUI has one toast slot; a later toast can replace the 24-hour
+  report. The structured log record stays.
+- The OpenAI-compatible stream does not carry prefill progress, so the
+  plugin's live count and ETA are estimates. The menu-bar app reads exact
+  progress from the server log.
+- Ollama also defaults to port 11434. The setup default of 11435 avoids that.
+- Everything is MIT licensed. Slotstream and the model have their own licences.

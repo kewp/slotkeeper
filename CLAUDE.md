@@ -23,7 +23,7 @@ patch --dry-run --forward --batch -p1 < patches/slotstream-0.2.14-opencode-retry
 
 Validation is manual: install the plugin, restart OpenCode, run a request against Slotstream, and check the toast and `~/.local/share/opencode/log/opencode.log` (service `model-stats`).
 
-Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`, `plutil -lint launchd/*.plist`. `scripts/slotstream-ctl.sh status` and `MONITOR_ONCE=1 scripts/monitor.sh` are read-only against the live server and safe to run any time.
+New machine: `scripts/setup.sh` (see README). Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`, `plutil -lint launchd/*.plist`. `scripts/slotstream-ctl.sh status` and `MONITOR_ONCE=1 scripts/monitor.sh` are read-only against the live server and safe to run any time.
 
 ## Operating rules
 
@@ -31,9 +31,9 @@ Script checks: `bash -n scripts/*.sh`, `python3 -m py_compile scripts/bench.py`,
 - `scripts/pressure-drill.sh` and `scripts/bench.py --set long` load the machine; run them only when asked.
 - Server window and OpenCode's `limit.context` for provider `slotstream` must match. `slotstream-ctl.sh status` warns on mismatch. The OpenCode config is JSONC (trailing commas), so do not parse it with `jq`.
 - Profiles: everyday 32768, conservative 16384, deep 65536, persisted in `~/.slotstream/profile`. Port and other knobs live in `~/.slotstream/ctl.env` (currently port 11435; Ollama keeps 11434). All scripts and the app read that file.
-- Four LaunchAgents: `work.penz.slotstream` (server), `-monitor`, `-exerciser`, and `work.penz.slotstreambar` (menu-bar app). `stop` unloads the server job so KeepAlive cannot respawn it; `start` bootstraps it again. Manage them only through `scripts/slotstream-ctl.sh`; `launchctl kickstart` hangs in this environment, the script uses bootout/bootstrap. Side-agent scripts must be executable (launchd exits 78 otherwise).
+- Four LaunchAgents: `local.slotstream` (server), `-monitor`, `-exerciser`, and `local.slotstreambar` (menu-bar app). `stop` unloads the server job so KeepAlive cannot respawn it; `start` bootstraps it again. Manage them only through `scripts/slotstream-ctl.sh`; `launchctl kickstart` hangs in this environment, the script uses bootout/bootstrap. Side-agent scripts must be executable (launchd exits 78 otherwise).
 - "How is it going?" means: run `scripts/report.py` (add `--hours N`), `scripts/slotstream-ctl.sh exerciser status`, and look at recent failures in `~/.slotstream/metrics/exerciser.jsonl`.
-- The server runs under launchd (`work.penz.slotstream`). Use the control script to stop/start; do not `pkill` it, launchd will respawn it after 30 s and `pkill -f "slotstream serve"` also kills any foreground test run.
+- The server runs under launchd (`local.slotstream`). Use the control script to stop/start; do not `pkill` it, launchd will respawn it after 30 s and `pkill -f "slotstream serve"` also kills any foreground test run.
 - Scripts must stay compatible with `/bin/bash` 3.2 (launchd runs them with it): no `mapfile`, no associative arrays. `lsof` exits 1 on no match, so guard pipelines under `pipefail`.
 - Rebuilding Slotstream: extract `~/.slotstream/bin/build-source.tar.gz.0.2.14.original` (kept in the first release dir), apply the repo patch, copy `~/.slotstream/bin/mlx.metallib` to `Tools/lib/mlx-0.31.1.metallib`, then `make checks && make build` (about 5 minutes). Install with `scripts/install-release.sh`.
 

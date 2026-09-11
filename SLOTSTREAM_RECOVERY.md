@@ -4,6 +4,10 @@ Last verified: 2026-09-11 17:00 CEST
 
 ## Purpose
 
+This document records one specific installation (the author's 24 GB M4 Pro).
+Hashes, release directory names and measurements are that machine's. Use it
+as the worked example of the procedure, not as values to copy.
+
 This integration makes local Slotstream inference failures visible in OpenCode
 and safely retries transient memory-pressure failures when doing so cannot
 duplicate generated text or tool effects.
@@ -35,7 +39,7 @@ The implementation has two parts:
 - Model: `qwen3.8-flash-next:4bit`
 - Context limit: 32,768 tokens (everyday profile; `deep` = 65,536 on request)
 - Output limit: 4,096 tokens
-- Supervisor: LaunchAgent `work.penz.slotstream` running `scripts/slotstream-ctl.sh run`
+- Supervisor: LaunchAgent `local.slotstream` running `scripts/slotstream-ctl.sh run`
 - Effective server command: `slotstream serve --model qwen3.8-flash-next:4bit --port 11435 --max-context 32768 --max-prefill-wait 10 --vision off`
 - Persistent settings: `~/.slotstream/ctl.env` (`SLOTSTREAM_PORT=11435`), `~/.slotstream/profile` (`everyday`)
 - Server log: `~/.slotstream/slotstream.log` (rotated at 10 MB by the control script)
@@ -192,8 +196,8 @@ target first and refuse an already-applied or reversed patch:
 
 ```sh
 for p in slotstream-0.2.14-opencode-retry slotstream-0.2.14-stale-pressure; do
-  patch --dry-run --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/$p.patch
-  patch --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/$p.patch
+  patch --dry-run --forward --batch -p1 < patches/$p.patch
+  patch --forward --batch -p1 < patches/$p.patch
 done
 cp ~/.slotstream/bin/mlx.metallib Tools/lib/mlx-0.31.1.metallib   # the archive omits the 131 MB metallib
 make checks

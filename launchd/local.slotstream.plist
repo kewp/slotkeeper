@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>work.penz.slotstream</string>
+  <string>local.slotstream</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>

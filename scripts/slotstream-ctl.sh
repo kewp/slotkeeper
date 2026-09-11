@@ -18,10 +18,10 @@
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
-#   bar <install|uninstall|restart|status> Menu-bar app at login (work.penz.slotstreambar); builds it first.
-#   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (work.penz.slotstream-monitor).
+#   bar <install|uninstall|restart|status> Menu-bar app at login (local.slotstreambar); builds it first.
+#   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (local.slotstream-monitor).
 #   exerciser <start|stop|pause [reason]|resume|status|report>
-#                       Background task suite as a LaunchAgent (work.penz.slotstream-exerciser).
+#                       Background task suite as a LaunchAgent (local.slotstream-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
 # deep disables the prefill-wait budget (a full 65K prompt needs ~13 min before its first token);
@@ -53,7 +53,7 @@ OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 LOG="$SLOTSTREAM_HOME/slotstream.log"
 PROFILE_FILE="$SLOTSTREAM_HOME/profile"
 PID_FILE="$SLOTSTREAM_HOME/slotstream.pid"
-AGENT_LABEL="work.penz.slotstream"
+AGENT_LABEL="local.slotstream"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 BASE="http://127.0.0.1:$SLOTSTREAM_PORT"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -372,7 +372,7 @@ remove_side_agent() {
 }
 
 cmd_bar() {
-  local label="work.penz.slotstreambar" pkg="$SCRIPT_DIR/../SlotstreamBar" bin
+  local label="local.slotstreambar" pkg="$SCRIPT_DIR/../SlotstreamBar" bin
   case "${1:-status}" in
     install|restart)
       log "building SlotstreamBar (release)"
@@ -389,7 +389,7 @@ cmd_bar() {
 }
 
 cmd_monitor() {
-  local label="work.penz.slotstream-monitor"
+  local label="local.slotstream-monitor"
   case "${1:-status}" in
     start) pkill -f "scripts/monitor.sh" 2>/dev/null || true; install_side_agent "$label" "$SCRIPT_DIR/monitor.sh" "$SLOTSTREAM_HOME/monitor.log" ;;
     stop) remove_side_agent "$label" ;;
@@ -399,7 +399,7 @@ cmd_monitor() {
 }
 
 cmd_exerciser() {
-  local label="work.penz.slotstream-exerciser" pause="$SLOTSTREAM_HOME/exerciser.pause" state="$SLOTSTREAM_HOME/exerciser.state.json"
+  local label="local.slotstream-exerciser" pause="$SLOTSTREAM_HOME/exerciser.pause" state="$SLOTSTREAM_HOME/exerciser.state.json"
   case "${1:-status}" in
     start) rm -f "$pause"; install_side_agent "$label" "$SCRIPT_DIR/exerciser.py" "$SLOTSTREAM_HOME/exerciser.log" ;;
     stop) remove_side_agent "$label" ;;

@@ -123,20 +123,20 @@ source and patches in a separate repository before upgrading.
 The current integration patch is:
 
 ```text
-/Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+patches/slotstream-0.2.14-opencode-retry.patch
 ```
 
 For stock 0.2.14 source, check the actual target directory and fail closed if the
 patch is already present or cannot apply forward:
 
 ```sh
-patch --dry-run --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+patch --dry-run --forward --batch -p1 < patches/slotstream-0.2.14-opencode-retry.patch
 ```
 
 Then apply it once to that same worktree:
 
 ```sh
-patch --forward --batch -p1 < /Users/karl/opencode-model-stats/patches/slotstream-0.2.14-opencode-retry.patch
+patch --forward --batch -p1 < patches/slotstream-0.2.14-opencode-retry.patch
 ```
 
 If the source came from the currently installed patched archive, skip both patch

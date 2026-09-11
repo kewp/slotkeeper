@@ -311,7 +311,7 @@ final class StatusModel: ObservableObject {
 
     private func readExerciser() -> ExerciserState {
         var st = ExerciserState()
-        st.installed = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/work.penz.slotstream-exerciser.plist")
+        st.installed = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.slotstream-exerciser.plist")
         if let flag = try? String(contentsOf: home.appendingPathComponent("exerciser.pause"), encoding: .utf8) {
             st.pauseFlag = flag.trimmingCharacters(in: .whitespacesAndNewlines)
         }
