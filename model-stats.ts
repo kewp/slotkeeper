@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import type { Part } from "@opencode-ai/sdk"
 
 const PROVIDER_ID = "slotstream"
 const COMPLETED_TOAST_MS = 24 * 60 * 60 * 1000
@@ -15,6 +16,7 @@ type InFlight = {
   runtimeURL?: string
   startedAt: number
   timer: ReturnType<typeof setInterval>
+  estimatedPromptTokens?: number
 }
 
 type RuntimeStats = {
@@ -27,9 +29,16 @@ type RuntimeStats = {
   expertsPerLayer?: number
   expectedPeakGB?: number
   fullyResident?: boolean
-  modelMemoryBytes?: number
+  prefillChunk?: number
+  processResidentBytes?: number
+  prefixCacheConversations?: number
   prefixCacheEnabled?: boolean
+  prefixCacheEvictions?: number
+  prefixCacheHeldGB?: number
+  prefixCacheHeldTokens?: number
+  prefixCacheHits?: number
   prefixCacheMaxTokens?: number
+  prefixCacheMisses?: number
 }
 
 function formatDuration(milliseconds: number) {
@@ -52,6 +61,17 @@ function formatSigned(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toLocaleString()}`
 }
 
+function estimatePartTokens(part: Part) {
+  let value = ""
+  if (part.type === "text" || part.type === "reasoning") value = part.text
+  else if (part.type === "tool") value = JSON.stringify(part.state)
+  else if (part.type === "subtask") value = `${part.description}\n${part.prompt}`
+  else if (part.type === "file") value = `${part.filename ?? ""}\n${part.url}`
+  else if (part.type === "patch") value = part.files.join("\n")
+
+  return Math.ceil(value.length / 4) + 4
+}
+
 function getRuntimeURL(baseURL: unknown) {
   if (typeof baseURL !== "string") return
 
@@ -68,35 +88,46 @@ function getRuntimeURL(baseURL: unknown) {
 
 async function fetchRuntimeStats(runtimeURL: string, modelID: string): Promise<RuntimeStats | undefined> {
   try {
-    const response = await fetch(runtimeURL, { signal: AbortSignal.timeout(2000) })
-    if (!response.ok) return
+    const showURL = new URL(runtimeURL)
+    showURL.pathname = showURL.pathname.replace(/\/api\/ps\/?$/, "/api/show")
+    const [psResult, showResult] = await Promise.allSettled([
+      fetch(runtimeURL, { signal: AbortSignal.timeout(2000) }),
+      fetch(showURL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: modelID }),
+        signal: AbortSignal.timeout(2000),
+      }),
+    ])
 
-    const body = (await response.json()) as {
+    const psResponse = psResult.status === "fulfilled" && psResult.value.ok ? psResult.value : undefined
+    const showResponse = showResult.status === "fulfilled" && showResult.value.ok ? showResult.value : undefined
+    if (!psResponse && !showResponse) return
+
+    const psBody = psResponse ? await psResponse.json() as {
       models?: Array<{
         model?: string
         name?: string
         size_vram?: number
         details?: {
           experts_per_layer?: number
-          memory_plan?: {
-            device_ram_gb?: number
-            device_working_set_gb?: number
-            est_prefill_tok_s?: number
-            est_warm_tok_s?: number
-            experts_per_layer_cached?: number
-            expected_peak_gb?: number
-            fully_resident?: boolean
-            implementation_context_limit?: number
-            prefix_cache_max_tokens?: number
-            runtime_prefix_cache_enabled?: boolean
-          }
+          memory_plan?: MemoryPlan
         }
       }>
-    }
-    const model = body.models?.find((item) => item.model === modelID || item.name === modelID)
-    if (!model) return
+    } : undefined
+    const showBody = showResponse ? await showResponse.json() as {
+      details?: {
+        experts_per_layer?: number
+        memory_plan?: MemoryPlan
+        prefix_cache?: PrefixCache
+      }
+    } : undefined
+    const model = psBody?.models?.find((item) => item.model === modelID || item.name === modelID)
+    const details = showBody?.details ?? model?.details
+    if (!model && !details) return
 
-    const plan = model.details?.memory_plan
+    const plan = details?.memory_plan
+    const cache = showBody?.details?.prefix_cache
     return {
       contextLimit: plan?.implementation_context_limit,
       deviceRamGB: plan?.device_ram_gb,
@@ -104,16 +135,48 @@ async function fetchRuntimeStats(runtimeURL: string, modelID: string): Promise<R
       estimatedPrefillTokensPerSecond: plan?.est_prefill_tok_s,
       estimatedWarmTokensPerSecond: plan?.est_warm_tok_s,
       expertsCachedPerLayer: plan?.experts_per_layer_cached,
-      expertsPerLayer: model.details?.experts_per_layer,
+      expertsPerLayer: details?.experts_per_layer,
       expectedPeakGB: plan?.expected_peak_gb,
       fullyResident: plan?.fully_resident,
-      modelMemoryBytes: model.size_vram,
-      prefixCacheEnabled: plan?.runtime_prefix_cache_enabled,
-      prefixCacheMaxTokens: plan?.prefix_cache_max_tokens,
+      prefillChunk: plan?.prefill_chunk,
+      processResidentBytes: model?.size_vram,
+      prefixCacheConversations: cache?.conversations,
+      prefixCacheEnabled: cache?.enabled ?? plan?.runtime_prefix_cache_enabled,
+      prefixCacheEvictions: cache?.evictions,
+      prefixCacheHeldGB: cache?.held_gb,
+      prefixCacheHeldTokens: cache?.held_tokens,
+      prefixCacheHits: cache?.hits,
+      prefixCacheMaxTokens: cache?.max_tokens ?? plan?.prefix_cache_max_tokens,
+      prefixCacheMisses: cache?.misses,
     }
   } catch {
     return
   }
+}
+
+type MemoryPlan = {
+  device_ram_gb?: number
+  device_working_set_gb?: number
+  est_prefill_tok_s?: number
+  est_warm_tok_s?: number
+  experts_per_layer_cached?: number
+  expected_peak_gb?: number
+  fully_resident?: boolean
+  implementation_context_limit?: number
+  prefill_chunk?: number
+  prefix_cache_max_tokens?: number
+  runtime_prefix_cache_enabled?: boolean
+}
+
+type PrefixCache = {
+  conversations?: number
+  enabled?: boolean
+  evictions?: number
+  held_gb?: number
+  held_tokens?: number
+  hits?: number
+  max_tokens?: number
+  misses?: number
 }
 
 export const ModelStats: Plugin = async ({ client, directory }) => {
@@ -149,6 +212,37 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
     return runtime
   }
 
+  const estimatePromptTokens = async (sessionID: string, agent: string) => {
+    try {
+      const response = await client.session.messages({
+        path: { id: sessionID },
+        query: { directory, limit: 200 },
+      })
+      const messages = response.data
+      if (!messages) return previousPromptBySession.get(requestKey(sessionID, agent))
+
+      const baselineIndex = messages.findLastIndex(({ info }) =>
+        info.role === "assistant" &&
+        info.providerID === PROVIDER_ID &&
+        info.mode === agent &&
+        Boolean(info.time.completed) &&
+        !info.error,
+      )
+      if (baselineIndex < 0) return
+
+      const baseline = messages[baselineIndex]?.info
+      if (!baseline || baseline.role !== "assistant") return
+      const baselineTokens = baseline.tokens.input + baseline.tokens.cache.read
+      const addedTokens = messages.slice(baselineIndex).reduce(
+        (total, message) => total + 4 + message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0),
+        0,
+      )
+      return baselineTokens + addedTokens
+    } catch {
+      return previousPromptBySession.get(requestKey(sessionID, agent))
+    }
+  }
+
   const showPrefill = async (key: string) => {
     const request = inFlight.get(key)
     if (!request) return
@@ -159,8 +253,23 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
       `waiting for first output | ${elapsed} elapsed`,
       `context limit ${(runtime?.contextLimit ?? request.contextLimit).toLocaleString()}`,
     ]
+    if (request.estimatedPromptTokens && runtime?.estimatedPrefillTokensPerSecond) {
+      const totalSeconds = request.estimatedPromptTokens / runtime.estimatedPrefillTokensPerSecond
+      const remainingSeconds = Math.max(0, totalSeconds - (Date.now() - request.startedAt) / 1000)
+      details.push(
+        `prompt ~${request.estimatedPromptTokens.toLocaleString()} tok`,
+        `cache-miss ETA ~${formatDuration(totalSeconds * 1000)} (${formatDuration(remainingSeconds * 1000)} left)`,
+      )
+    }
     if (runtime?.estimatedPrefillTokensPerSecond) {
-      details.push(`plan ~${runtime.estimatedPrefillTokensPerSecond.toFixed(0)} prefill tok/s`)
+      details.push(
+        `plan ~${runtime.estimatedPrefillTokensPerSecond.toFixed(0)} prefill tok/s${runtime.prefillChunk ? ` @ ${runtime.prefillChunk}-tok chunks` : ""}`,
+      )
+    }
+    if (runtime?.prefixCacheEnabled && runtime.prefixCacheMaxTokens !== undefined) {
+      details.push(
+        `prefix cache ${(runtime.prefixCacheHeldTokens ?? 0).toLocaleString()}/${runtime.prefixCacheMaxTokens.toLocaleString()} tok held`,
+      )
     }
     if (runtime?.deviceWorkingSetGB && runtime.deviceRamGB) {
       details.push(`device ${runtime.deviceWorkingSetGB.toFixed(1)}/${runtime.deviceRamGB.toFixed(1)} GB`)
@@ -210,6 +319,13 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
       contextByModel.set(input.model.id, input.model.limit.context)
       if (runtimeURL) runtimeURLByModel.set(input.model.id, runtimeURL)
       startPrefill(input.sessionID, input.agent, input.model.id, input.model.limit.context, runtimeURL)
+      const key = requestKey(input.sessionID, input.agent)
+      void estimatePromptTokens(input.sessionID, input.agent).then((estimatedPromptTokens) => {
+        const request = inFlight.get(key)
+        if (!request || !estimatedPromptTokens) return
+        request.estimatedPromptTokens = estimatedPromptTokens
+        void showPrefill(key)
+      })
     },
 
     event: async ({ event }) => {
@@ -231,8 +347,7 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
 
         current.firstOutputAt = Date.now()
         timing.set(part.messageID, current)
-        const agent = messageAgents.get(part.messageID)
-        if (agent) stopPrefill(part.sessionID, agent)
+        stopPrefill(part.sessionID)
         return
       }
 
@@ -309,7 +424,7 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
 
       if (runtime) {
         const memory = []
-        if (runtime.modelMemoryBytes) memory.push(`model ${formatBytes(runtime.modelMemoryBytes)}`)
+        if (runtime.processResidentBytes) memory.push(`process resident ${formatBytes(runtime.processResidentBytes)}`)
         if (runtime.deviceWorkingSetGB && runtime.deviceRamGB) {
           memory.push(`device ${runtime.deviceWorkingSetGB.toFixed(1)}/${runtime.deviceRamGB.toFixed(1)} GB`)
         }
@@ -329,6 +444,16 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
           )
         }
         if (residency.length) lines.push(residency.join(" | "))
+
+        if (runtime.prefixCacheHits !== undefined && runtime.prefixCacheMisses !== undefined) {
+          lines.push(
+            [
+              `prefix runtime ${runtime.prefixCacheHits} hits, ${runtime.prefixCacheMisses} misses, ${runtime.prefixCacheEvictions ?? 0} evictions`,
+              `${(runtime.prefixCacheHeldTokens ?? 0).toLocaleString()} tok held${runtime.prefixCacheHeldGB !== undefined ? ` (${runtime.prefixCacheHeldGB.toFixed(2)} GB)` : ""}`,
+              `${runtime.prefixCacheConversations ?? 0} conversations`,
+            ].join(" | "),
+          )
+        }
 
         const plannedRates = []
         if (runtime.estimatedPrefillTokensPerSecond) {
@@ -367,14 +492,19 @@ export const ModelStats: Plugin = async ({ client, directory }) => {
               ttftMs: ttftMs ?? null,
               decodeMs: decodeMs ?? null,
               totalMs,
-              modelMemoryBytes: runtime?.modelMemoryBytes ?? null,
+              processResidentBytes: runtime?.processResidentBytes ?? null,
               deviceWorkingSetGB: runtime?.deviceWorkingSetGB ?? null,
               deviceRamGB: runtime?.deviceRamGB ?? null,
               expectedPeakGB: runtime?.expectedPeakGB ?? null,
               expertsCachedPerLayer: runtime?.expertsCachedPerLayer ?? null,
               expertsPerLayer: runtime?.expertsPerLayer ?? null,
               prefixCacheEnabled: runtime?.prefixCacheEnabled ?? null,
+              prefixCacheEvictions: runtime?.prefixCacheEvictions ?? null,
+              prefixCacheHeldGB: runtime?.prefixCacheHeldGB ?? null,
+              prefixCacheHeldTokens: runtime?.prefixCacheHeldTokens ?? null,
+              prefixCacheHits: runtime?.prefixCacheHits ?? null,
               prefixCacheMaxTokens: runtime?.prefixCacheMaxTokens ?? null,
+              prefixCacheMisses: runtime?.prefixCacheMisses ?? null,
             },
           },
         }),

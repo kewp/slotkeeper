@@ -5,21 +5,26 @@ for a local Slotstream model.
 
 ## Features
 
-- Refreshes an elapsed-time toast every 15 seconds while waiting for first output.
+- Refreshes an elapsed-time toast every 15 seconds while waiting for first output,
+  and stops it as soon as text, reasoning, or a tool call begins streaming.
+- Estimates the current prompt size from the latest completed request and shows
+  a cache-miss ETA using Slotstream's planned prefill rate and chunk size.
 - Keeps the completed report visible for 24 hours.
 - Reports prompt, cached, cache-write, output, and reasoning tokens.
 - Reports context usage, prompt headroom, prompt growth, cache hit rate, TTFT,
   prefill rate, decode rate, end-to-end rate, finish reason, and total time.
-- Reads Slotstream's Ollama-compatible `/api/ps` endpoint for model memory,
-  device working set, planned peak, expert residency, prefix cache, and planned
-  inference rates.
+- Reads Slotstream's Ollama-compatible `/api/ps` and `/api/show` endpoints for
+  process resident memory, device working set, planned peak, expert residency,
+  live prefix-cache counters, and planned inference rates.
 - Writes the complete structured record to OpenCode's normal log through
   `client.app.log()`.
 
-The OpenAI-compatible streaming protocol does not report prefill token progress.
-The live status can therefore show elapsed time and runtime memory, but not an
-honest percentage complete. TTFT and actual prefill rate become available when
-the first output arrives.
+The OpenAI-compatible streaming protocol does not report prefill token progress,
+and `/api/show` does not expose the active request's reused-prefix length. The
+live prompt count and cache-miss ETA are therefore labeled as estimates; they do
+not claim an exact percentage or account for a cache hit. Slotstream's own
+terminal remains the only source for exact active prefill progress. TTFT and the
+observed prefill rate become available when the first output arrives.
 
 ## Install
 
