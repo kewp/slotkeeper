@@ -22,11 +22,17 @@ struct SlotstreamBarApp: App {
                 .labelStyle(.titleAndIcon)
         }
         .menuBarExtraStyle(.menu)
+
+        Window("Slotstream Dashboard", id: "dashboard") {
+            DashboardView()
+        }
+        .defaultSize(width: 900, height: 800)
     }
 }
 
 struct StatusMenu: View {
     @ObservedObject var status: StatusModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(status.headline).font(.headline)
@@ -62,6 +68,10 @@ struct StatusMenu: View {
             Button("Start Exerciser") { status.run("exerciser", "start") }
         }
         Divider()
+        Button("Open Dashboard…") {
+            openWindow(id: "dashboard")
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
         Button("Copy Endpoint") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(status.endpoint, forType: .string)

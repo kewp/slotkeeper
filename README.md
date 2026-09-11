@@ -6,9 +6,10 @@ for a local Slotstream model.
 See [SLOTSTREAM_RECOVERY.md](SLOTSTREAM_RECOVERY.md) for the implementation,
 operations, validation, and recovery reference.
 
-See [LOCAL_LLM_ROADMAP.md](LOCAL_LLM_ROADMAP.md) for the reliability roadmap
-and [SLOTSTREAM_DEVELOPMENT.md](SLOTSTREAM_DEVELOPMENT.md) for context changes,
-engine development, future-model support, and the macOS app proposal.
+See [LOCAL_LLM_ROADMAP.md](LOCAL_LLM_ROADMAP.md) for the reliability roadmap,
+[SLOTSTREAM_DEVELOPMENT.md](SLOTSTREAM_DEVELOPMENT.md) for context changes,
+engine development, and future-model support, and [APP_PLAN.md](APP_PLAN.md)
+for the full-app plan and the analysis of context windows beyond 65K.
 
 ## Features
 
@@ -73,6 +74,7 @@ scripts/slotstream-ctl.sh install-agent   # LaunchAgent: restart on crash, log c
 scripts/slotstream-ctl.sh monitor start   # 30 s JSONL samples to ~/.slotstream/metrics/ (LaunchAgent)
 scripts/slotstream-ctl.sh exerciser start # continuous task suite (LaunchAgent); pause/resume/status/report
 scripts/report.py --hours 24              # what the exerciser, bench and monitor recorded
+scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # context sweep
 scripts/bench.py --label 32k              # one-off TTFT / prefill / decode measurements
 scripts/pressure-drill.sh                 # simulated memory pressure during prefill; checks retry wording
 scripts/install-plugin.sh                 # standalone plugin copy (or --link for the repo shim)

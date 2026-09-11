@@ -23,6 +23,9 @@ Settings (env or ctl.env):
 Usage: exerciser.py            run forever
        exerciser.py --once     run one full cycle and exit
        exerciser.py --task X   run one named task and exit (see TASKS)
+       exerciser.py --sweep 4000,8000,16000,24000,32000 [--label name]
+                               context sweep: codebase summary at each prompt size, in order,
+                               then exit. Rows carry task "sweep-<tokens>" for the report/dashboard.
        exerciser.py --list
 """
 import argparse, json, os, random, signal, socket, subprocess, sys, threading, time, urllib.request, urllib.error
@@ -521,7 +524,7 @@ def run_task(name):
         elapsed = round(time.monotonic() - t0, 2)
     sys_after, plan_after = system_sample(), plan_snapshot()
     row = {
-        "ts": now(), "task": name, "cycle": state["cycle"], "ok": check["ok"], "note": check["note"], "elapsed_s": elapsed,
+        "ts": now(), "task": name, "label": state.get("label", ""), "cycle": state["cycle"], "ok": check["ok"], "note": check["note"], "elapsed_s": elapsed,
         "ttft_s": result and result.get("ttft_s"), "prefill_tok_s": result and result.get("prefill_tok_s"),
         "decode_tok_s": result and result.get("decode_tok_s"), "prompt_tokens": result and result.get("prompt_tokens"),
         "output_tokens": result and result.get("output_tokens"), "finish": result and result.get("finish"),
@@ -569,6 +572,8 @@ def main():
     ap.add_argument("--task", choices=sorted(TASKS))
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--gap", type=float, default=GAP_S)
+    ap.add_argument("--sweep", help="comma-separated prompt sizes in tokens")
+    ap.add_argument("--label", default="")
     args = ap.parse_args()
     if args.list:
         for n, (_, w, h) in TASKS.items():
@@ -584,6 +589,18 @@ def main():
     if args.task:
         if wait_while_paused():
             run_task(args.task)
+        return
+
+    if args.sweep:
+        sizes = [int(x) for x in args.sweep.split(",") if x.strip()]
+        for size in sizes:
+            name = f"sweep-{size}"
+            TASKS[name] = (lambda size=size: t_codebase_summary(size), 0, True)
+            if not wait_while_paused():
+                break
+            state["label"] = args.label
+            run_task(name)
+            time.sleep(min(args.gap, 30))
         return
 
     print(f"exerciser: {BASE} model {MODEL}; corpus {REPOS}; gap {args.gap}s; state {STATE}", flush=True)
