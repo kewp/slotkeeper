@@ -52,7 +52,23 @@ def load(name):
 
 
 def ctl(*args, timeout=600):
-    return subprocess.run(["bash", CTL] + list(args), capture_output=True, text=True, timeout=timeout)
+    # The supervisor's fallback to safe settings would hide exactly what we are measuring.
+    env = {**os.environ, "SLOTKEEPER_NO_FALLBACK": "1"}
+    return subprocess.run(["bash", CTL] + list(args), capture_output=True, text=True,
+                          timeout=timeout, env=env)
+
+
+def applied_window():
+    """The window the server is actually serving, which is not always the one we asked for."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{os.environ.get('SLOTSTREAM_PORT', '11434')}/api/show",
+            data=json.dumps({"name": os.environ.get("SLOTSTREAM_MODEL", "qwen3.8-flash-next:4bit")}).encode(),
+            headers={"Content-Type": "application/json"})
+        return json.load(urllib.request.urlopen(req, timeout=10))["details"]["memory_plan"]["max_context_tokens"]
+    except Exception:
+        return None
 
 
 def busy():
@@ -317,6 +333,15 @@ def restart(window, target_gb, retention=None, chunk=None, slack=None):
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
+        # Trust the server, not the request: verify the window it is actually serving.
+        applied = applied_window()
+        if applied is not None and applied != window:
+            why = f"asked for {window:,} but the server came up at {applied:,}"
+            print(f"    {why}", flush=True)
+            RESTART_REASON["why"] = why
+            log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
+                        retention=retention or "default", ok=False, reason=why)
+            return False
         LAST_GOOD["config"] = (window, target_gb, retention, chunk)
         log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
                     retention=retention or "default", ok=True, reason="server started")

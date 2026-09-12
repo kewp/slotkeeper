@@ -225,6 +225,9 @@ cmd_run() {
 # was interrupted mid-search), fall back to settings we know work and say so loudly.
 start_fallback() {
   local context="$1"
+  # Something measuring what this machine can do must see the real failure, not a
+  # quietly different server. SLOTKEEPER_NO_FALLBACK=1 turns the safety net off.
+  [[ "${SLOTKEEPER_NO_FALLBACK:-0}" == 1 ]] && return 1
   log "warning: the server would not start at ${context} tokens with the current settings; falling back"
   local env_file="$SLOTSTREAM_HOME/ctl.env"
   if [[ -f "$env_file" ]]; then
@@ -247,7 +250,7 @@ cmd_start() {
     launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
     if ! wait_ready 210; then
-      start_fallback "$context"
+      start_fallback "$context" || die "the server would not start at ${context} tokens; see $LOG"
       context="$(resolve_profile "")"
       launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
