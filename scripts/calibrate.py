@@ -230,6 +230,18 @@ def run(args):
         "machine": _machine_description(),
         "ram_percent": os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70"),
     }
+    # Say which wall we hit, because "65,536" means something different on a 24 GB
+    # machine (memory) than on a 64 GB one (the server refuses a larger window).
+    ram, working_set = _machine()
+    ceiling = _ceiling(ram, working_set, float(result["ram_percent"]))
+    if chosen["window"] >= 65_536:
+        result["limited_by"] = "the server's 65,536-token limit, not this machine's memory"
+    elif failed:
+        result["limited_by"] = "memory during long prefills, above the size shown"
+    elif ceiling <= chosen["window"]:
+        result["limited_by"] = "memory: a larger window does not fit in the planned target"
+    else:
+        result["limited_by"] = "the sizes tested; a larger window may still fit"
     result["headline"] = (
         f"up to {result['comfortable_prompt']:,}-token prompts at a {result['window']:,} window"
         + (f", about {result['ttft_median_s']:.0f} s to the first token" if result["ttft_median_s"] else "")
@@ -288,6 +300,8 @@ def show(result=None):
         print(f"  rates:          {result['prefill_median_tok_s']:.0f} tok/s reading, "
               f"{result.get('decode_median_tok_s') or 0:.1f} tok/s generating")
     print(f"  measured:       {result['measured_at']}")
+    if result.get("limited_by"):
+        print(f"  limited by:     {result['limited_by']}")
     ok, why = current(result)
     if not ok:
         print(f"  out of date:    {why}")

@@ -214,6 +214,9 @@ struct DashboardView: View {
                         }
                         Spacer()
                     }
+                    if let limit = c.limitedBy {
+                        Text("limited by " + limit).font(.callout).foregroundStyle(.secondary)
+                    }
                     Text(c.provenance).font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text(calibrating ? "measuring…" : "not measured yet")
@@ -274,7 +277,8 @@ struct DashboardView: View {
             decode: o["decode_median_tok_s"] as? Double,
             prefill: o["prefill_median_tok_s"] as? Double,
             machine: o["machine"] as? String ?? "",
-            measured: (o["finished_at"] as? String).flatMap(DashboardView.parseDate))
+            measured: (o["finished_at"] as? String).flatMap(DashboardView.parseDate),
+            limitedBy: o["limited_by"] as? String)
     }
 
     /// The one-screen answer to "how is it going": how long it has been up, what it has
@@ -801,6 +805,7 @@ struct Calibration {
     var prefill: Double?
     var machine: String
     var measured: Date?
+    var limitedBy: String?
 
     var promptText: String { comfortable >= 1000 ? "\(comfortable / 1000)K" : "\(comfortable)" }
 
