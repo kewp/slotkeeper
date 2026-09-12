@@ -21,10 +21,32 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
+# Shared settings (port, model, knobs) live in ctl.env, as they do for the other scripts.
+_env = os.path.join(HOME, "ctl.env")
+if os.path.exists(_env):
+    for _line in open(_env):
+        if "=" in _line and not _line.startswith("#"):
+            _k, _v = _line.rstrip("\n").split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 M = os.path.join(HOME, "metrics")
 OPENCODE_DB = os.environ.get("OPENCODE_DB", os.path.expanduser("~/.local/share/opencode/opencode.db"))
 PROVIDER = os.environ.get("SLOTSTREAM_PROVIDER_ID", "slotstream")
-PROMPT_BUCKETS = [(0, 2000, "<2K"), (2000, 8000, "2-8K"), (8000, 16000, "8-16K"), (16000, 24000, "16-24K"), (24000, 10**9, "24K+")]
+def prompt_buckets(window=None):
+    """Size bands scaled to the server's window, so the table reads the same on any machine."""
+    if not window:
+        try:
+            import urllib.request
+            port = os.environ.get("SLOTSTREAM_PORT", "11434")
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/show",
+                                         data=b'{"name":"' + os.environ.get("SLOTSTREAM_MODEL", "qwen3.8-flash-next:4bit").encode() + b'"}',
+                                         headers={"Content-Type": "application/json"})
+            window = json.load(urllib.request.urlopen(req, timeout=5))["details"]["memory_plan"]["max_context_tokens"]
+        except Exception:
+            window = 32768
+    edges = [int(window * f) for f in (0.0625, 0.25, 0.5, 0.75)]
+    labels = [f"<{edges[0] // 1000}K"] + [f"{a // 1000}-{b // 1000}K" for a, b in zip(edges, edges[1:])] + [f"{edges[-1] // 1000}K+"]
+    bounds = [0] + edges + [10**9]
+    return [(lo, hi, label) for lo, hi, label in zip(bounds, bounds[1:], labels)]
 
 
 def rows_of(path):
@@ -149,7 +171,7 @@ def opencode_summary(reqs):
         if r["error"]:
             kinds[r["error"]] += 1
     buckets = {}
-    for lo, hi, label in PROMPT_BUCKETS:
+    for lo, hi, label in prompt_buckets():
         rs = [r for r in ok if lo <= r["prompt"] < hi and r["ttft_s"] is not None]
         if rs:
             buckets[label] = {"n": len(rs), "ttft_med_s": med([r["ttft_s"] for r in rs]), "ttft_p90_s": pct([r["ttft_s"] for r in rs], 0.9),

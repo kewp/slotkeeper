@@ -18,7 +18,8 @@ Settings (env or ctl.env):
   EXERCISER_REPOS            colon-separated source trees for code tasks (default: this repo)
   EXERCISER_GAP_S            idle gap between tasks (default 90)
   EXERCISER_PAUSE_ON_BATTERY 1 = pause while discharging (default 1)
-  EXERCISER_MAX_PROMPT       largest prompt the long tasks build, tokens (default 24000)
+  EXERCISER_MAX_PROMPT       largest prompt the long tasks build, tokens (default: 80% of the
+                             server's window, so the suite fits whatever machine it runs on)
   EXERCISER_HEAVY_HOURS      local hours when heavy tasks (long prefills) may run, start-end,
                              wrapping midnight (default 0-7); outside them they are skipped
   EXERCISER_HEAVY_IDLE_MIN   heavy tasks may also run after this many minutes without keyboard
@@ -30,6 +31,7 @@ Usage: exerciser.py            run forever
        exerciser.py --once     run one full cycle and exit
        exerciser.py --task X   run one named task and exit (see TASKS)
        exerciser.py --sweep 4000,8000,16000,24000,32000 [--label name]
+       exerciser.py --sweep auto   sizes derived from the server's window (1/8, 1/4, 1/2, 3/4, 9/10)
                                context sweep: codebase summary at each prompt size, in order,
                                then exit. Rows carry task "sweep-<tokens>" for the report/dashboard.
                                Pauses the background suite for the duration (exerciser.pause) and
@@ -54,7 +56,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPOS = [p for p in os.environ.get("EXERCISER_REPOS", REPO).split(":") if p]
 GAP_S = float(os.environ.get("EXERCISER_GAP_S", "90"))
 PAUSE_ON_BATTERY = os.environ.get("EXERCISER_PAUSE_ON_BATTERY", "1") == "1"
-MAX_PROMPT = int(os.environ.get("EXERCISER_MAX_PROMPT", "24000"))
+_MAX_PROMPT_ENV = os.environ.get("EXERCISER_MAX_PROMPT")
 HEAVY_HOURS = os.environ.get("EXERCISER_HEAVY_HOURS", "0-7")
 HEAVY_IDLE_MIN = float(os.environ.get("EXERCISER_HEAVY_IDLE_MIN", "30"))
 DAY_GAP_S = float(os.environ.get("EXERCISER_DAY_GAP_S", "600"))
@@ -65,6 +67,18 @@ ACTIVE = os.path.join(HOME, "opencode-active")
 SOURCE_EXT = (".ts", ".swift", ".py", ".sh", ".md", ".js", ".go", ".rs", ".c", ".h", ".cpp", ".java", ".kt")
 
 stop = False
+
+
+def server_window(default=32768):
+    """The server's configured prompt-plus-reply window, so prompt sizes suit any machine."""
+    plan = (api("/api/show", {"name": MODEL}) or {}).get("details", {}).get("memory_plan", {})
+    window = plan.get("max_context_tokens")
+    return window if isinstance(window, int) and window > 0 else default
+
+
+def sweep_sizes(window):
+    """A spread across the window: eighth, quarter, half, three quarters, nine tenths."""
+    return [int(window * f) // 1000 * 1000 for f in (0.125, 0.25, 0.5, 0.75, 0.9)]
 
 
 def now():
@@ -317,6 +331,10 @@ def build_codebase_prompt(target_tokens):
         if total > target_tokens * 0.95:
             break
     return "\n\n".join(parts), total, len(parts)
+
+
+# Resolved once the API helper exists: the long tasks fill most of the server's window.
+MAX_PROMPT = int(_MAX_PROMPT_ENV) if _MAX_PROMPT_ENV else int(server_window() * 0.8)
 
 
 # ---------- tasks ----------
@@ -667,7 +685,9 @@ def main():
 
     if args.sweep:
         global OWN_PAUSE
-        sizes = [int(x) for x in args.sweep.split(",") if x.strip()]
+        sizes = (sweep_sizes(server_window()) if args.sweep.strip() == "auto"
+                 else [int(x) for x in args.sweep.split(",") if x.strip()])
+        print(f"sweep sizes: {sizes}", flush=True)
         # The sweep must have the server to itself: a background task queued in front of a
         # sweep request eats its prefill-wait budget (sweep-8000 failed that way on 2026-09-11).
         # Pause the launchd suite for the duration, then wait for its current task to finish.

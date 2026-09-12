@@ -212,6 +212,11 @@ and B. Never import MLX or Slotstream into the app.
 
 ### A1. Requests table (est. 1 day)
 
+Source correction (2026-09-12): read OpenCode's own database, not the plugin's
+log, which OpenCode never writes. `scripts/report.py` has the working query and
+the field map is in 1.10; the plugin's `metrics/opencode.jsonl` joins on message
+id for the exact TTFT and the plan at the time.
+
 Goal: one table of every request, from any client.
 
 1. Add `Sources/Slotkeeper/RequestsStore.swift` with

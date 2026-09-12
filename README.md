@@ -63,7 +63,7 @@ scripts/slotkeeper restart deep      # 65K window for a long session; 'restart e
 scripts/slotkeeper exerciser status  # background suite; also pause / resume / report
 scripts/slotkeeper logs 100
 scripts/report.py --hours 24                # your OpenCode sessions first, then the synthetic suite
-scripts/exerciser.py --sweep 4000,8000,16000,24000,32000 --label everyday   # TTFT by prompt size
+scripts/exerciser.py --sweep auto --label everyday   # TTFT by prompt size, sizes from the window
 scripts/bench.py --label mytest             # one-off measurement
 scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)
 scripts/slotkeeper bundle            # support bundle for bug reports
@@ -130,6 +130,21 @@ conversations. To keep whole conversations, put
 | `SLOTSTREAM_DEVELOPMENT.md` | How Slotstream is built, what is hard to change, how to patch and ship it |
 | `SLOTSTREAM_RECOVERY.md` | The author's installed build, validation evidence, rebuild and rollback procedure |
 | `CLAUDE.md` | Operating rules for AI assistants working in this repo |
+
+## On another machine
+
+Slotstream sizes the expert cache from the machine it starts on, so a Mac with
+more memory gets a bigger cache and faster prefill and decode without any
+configuration. Slotkeeper follows: the exerciser's longest prompts and
+`--sweep auto` come from the server's window, and the report's size bands do
+too.
+
+Two things are per-machine and should not be copied from someone else's setup:
+the profile in `~/.slotstream/profile`, and anything in `~/.slotstream/ctl.env`.
+In particular `SLOTSTREAM_MAX_RAM_PERCENT` exists here to keep a 24 GB Mac out
+of memory pressure during long prefills; on a larger machine it only holds the
+cache back. Start without it, run `scripts/exerciser.py --sweep auto`, and add
+one only if long prompts fail with `insufficient_memory`.
 
 ## Notes
 

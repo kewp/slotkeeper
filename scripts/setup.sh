@@ -55,6 +55,9 @@ echo
 echo "Settings"
 PORT="${PORT:-$(ask "Server port (11434 collides with Ollama if you run it)" 11435)}"
 PROFILE="${PROFILE:-$(ask "Default profile: everyday (32K), conservative (16K), deep (65K)" everyday)}"
+# Slotstream sizes the expert cache from this machine on every start, so nothing here
+# needs a memory knob. Only add SLOTSTREAM_MAX_RAM_PERCENT if a sweep shows long prompts
+# failing under memory pressure; copying another machine's value only holds this one back.
 mkdir -p "$SLOTSTREAM_HOME/metrics"
 {
   echo "SLOTSTREAM_PORT=$PORT"
