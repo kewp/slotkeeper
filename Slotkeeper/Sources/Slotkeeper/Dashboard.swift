@@ -29,6 +29,8 @@ struct DashboardView: View {
     @State private var autoCalibrationStopped = false
     @State private var calibrationNote: String?
     @State private var calibrationProgress: CalibrationProgress?
+    @State private var calibrationLog = ""
+    @State private var calibrationLogExpanded = true
     @State private var budget: BudgetTables?
     @State private var hours = 24.0
 
@@ -65,7 +67,7 @@ struct DashboardView: View {
         .onChange(of: hours) { _, _ in load() }
         // Calibration publishes what it is doing; while it runs, follow it closely.
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            if calibrating || calibrationProgress != nil { loadCalibration() }
+            loadCalibration()
         }
         // While a request is running, refresh the table often enough to watch turns land,
         // and leave it alone when the server is idle: each reload spawns report.py.
@@ -234,10 +236,16 @@ struct DashboardView: View {
                          : "runs on its own when you are away, or start it now")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let p = calibrationProgress, calibrating {
+                if let p = calibrationProgress {
                     Divider()
                     VStack(alignment: .leading, spacing: 4) {
                         Text(p.headline).font(.callout)
+                        Text(p.rows.isEmpty && p.attempts.isEmpty
+                             ? "no prompt has finished yet at this configuration"
+                             : "\(p.rows.filter(\.ok).count) prompts answered, "
+                               + "\(p.rows.filter { !$0.ok }.count) refused, "
+                               + "\(p.attempts.count) configurations tried")
+                            .font(.caption).foregroundStyle(.secondary)
                         if let bar = p.fractionDone {
                             ProgressView(value: bar) { Text(p.step).font(.caption) }
                         }
@@ -254,6 +262,14 @@ struct DashboardView: View {
                                 Text("\(row.window / 1000)K window, \(row.size.formatted()) tokens")
                                     .frame(width: 210, alignment: .leading)
                                 Text(row.detail).foregroundStyle(.secondary)
+                            }.font(.caption)
+                        }
+                        if !calibrationLog.isEmpty {
+                            DisclosureGroup("what it is doing", isExpanded: $calibrationLogExpanded) {
+                                Text(calibrationLog)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }.font(.caption)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
@@ -296,6 +312,11 @@ struct DashboardView: View {
         calibrating = !DashboardView.shell("/usr/bin/pgrep", ["-f", "calibrate.py"]).isEmpty
         calibrationProgress = CalibrationProgress(
             file: home.appendingPathComponent("calibration.progress.json"))
+        // The running commentary, which is what the terminal shows.
+        calibrationLog = DashboardView.tail(home.appendingPathComponent("calibrate.log"), lines: 14)
+        if calibrationLog.isEmpty {
+            calibrationLog = DashboardView.tail(home.appendingPathComponent("calibrate-auto.log"), lines: 14)
+        }
         guard let data = try? Data(contentsOf: home.appendingPathComponent("calibration.json")),
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             calibration = nil
@@ -679,6 +700,15 @@ struct DashboardView: View {
             ? "kernel level normal, \(free) free"
             : "kernel level \(name) with \(free) free" + (Int(free.replacingOccurrences(of: "%", with: "")) ?? 0 > 50
                 ? " — elevated while memory is free; reset with: sudo memory_pressure -l normal" : "")
+    }
+
+    static func tail(_ url: URL, lines: Int) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > 8_000 ? size - 8_000 : 0)
+        let text = String(data: (try? handle.readToEnd()) ?? Data(), encoding: .utf8) ?? ""
+        return text.split(separator: "\n").suffix(lines).joined(separator: "\n")
     }
 
     static func shell(_ path: String, _ args: [String]) -> String {
