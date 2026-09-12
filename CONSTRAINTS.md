@@ -44,6 +44,7 @@ is a constant someone chose, and this project has already changed seven of them.
 
 | Limit | Why it is real |
 | --- | --- |
+| Memory the machine reports as "free" is mostly weight cache | Measured 2026-09-12: with a 24 GiB machine showing 13 GB "free", `vm_stat` reported 19.3 GB file-backed, 1.6 GB anonymous, 0.2 GB actually free. Those file-backed pages are the memory-mapped model weights. Raising the memory target does not claim idle memory; it converts weight cache into the server's own pool and context state. Which is worth more is a measurement, and it is why a bigger expert pool has not bought much decode speed here. |
 | 68 GB of experts on a 24 GB machine | Most of each token is streamed from SSD. Generation sits near 3 tok/s here and rises with memory because more experts stay cached. Different hardware is the only lever. |
 | 27,648 bytes per context token | The model's own state size. It sets what a window costs: about 0.11 GB per 1,000 tokens with the whole conversation kept. |
 | 262,144-token checkpoint limit | The positions the checkpoint was configured for. Beyond it is a different model, not a setting. |

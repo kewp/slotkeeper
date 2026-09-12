@@ -53,6 +53,18 @@ which is exactly what calibration reports per machine.
    target and window, including above 65,536, and `setup.sh` installs it on a fresh
    machine; one clean end-to-end run on this Mac is what proves it.
 
+## Where the memory actually goes
+
+A machine reporting "13 GB free" is not idle. On 2026-09-12, with the server running,
+`vm_stat` showed 19.3 GB file-backed, 1.6 GB anonymous and 0.2 GB free: the file-backed
+pages are the memory-mapped weights, which macOS counts as reclaimable and Activity
+Monitor-style tools show as free. The machine is full, and what fills it is the cache
+that keeps the next token off the SSD.
+
+So a bigger memory target is a trade, not a free win: it moves RAM from weight cache to
+the expert pool and context state. That is the likeliest reason decode has barely moved
+across pool sizes here, and it is the thing to measure next rather than assume.
+
 ## The honest limits, with numbers
 
 From the planner's ledger at a 49,152 window: fixed footprint 5.30 GB, planning margin
