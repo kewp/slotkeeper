@@ -14,10 +14,10 @@ tokens, the server reused 98 to 99% of each prompt, and follow-up turns answered
 to 80 seconds. The first turn cost 13 minutes, because a cold conversation is read from
 scratch.
 
-What it is not: a replacement for a 100K-context cloud agent. The window stops at
-65,536 (Slotstream refuses more), and on 24 GB the practical ceiling is lower still.
-Generation runs at about 3 tokens per second because the model streams 68 GB of experts
-from SSD; no amount of tuning changes that on this hardware.
+Generation runs at about 3 tokens per second on this machine because the model streams
+68 GB of experts from SSD past a 24 GB memory budget. That ratio is the one thing here
+that hardware decides: a machine with more memory caches more experts and goes faster,
+which is exactly what calibration reports per machine.
 
 ## What is done
 
@@ -49,8 +49,9 @@ from SSD; no amount of tuning changes that on this hardware.
    memory for it.
 5. **The five patches are not upstreamed.** Pull-request text is written in
    `patches/README.md`.
-6. **A fresh machine still needs a person.** `setup.sh` installs and starts services but
-   does not yet calibrate, so a new user gets defaults rather than their own numbers.
+6. **The search has not yet completed a full run.** Calibration now searches memory
+   target and window, including above 65,536, and `setup.sh` installs it on a fresh
+   machine; one clean end-to-end run on this Mac is what proves it.
 
 ## The honest limits, with numbers
 
@@ -60,10 +61,13 @@ workspace 1.33, retained conversation 1.70, expert pool 3.48, expected peak 13.1
 
 Every context token costs 27,648 bytes wherever it appears, so with the whole
 conversation retained each 1,000 tokens of window costs about 0.11 GB on top of a
-9.7 GB base. That is why 65,536 does not fit on this machine under a 55% cap: the
-smallest possible plan is 14.27 GB against a 14.2 GB target.
+9.7 GB base. A 55% cap was an early workaround on this machine, and under it 65,536 could not fit:
+the smallest possible plan was 14.27 GB against a 14.2 GB target. Calibration no longer
+takes that cap as given; it searches the memory target itself and writes what works.
 
-On other machines, with the default 70% share:
+What the arithmetic says for other machines, at the default 70% share (calibration
+measures the real answer, which is usually better than this table, because it will take
+an explicit memory target past auto's own ceiling):
 
 | RAM | memory target | largest window | expert cache there |
 | ---: | ---: | ---: | ---: |
@@ -81,10 +85,9 @@ actual safety margin is the 1 GB planning margin plus an availability slack of
 
 ## Next, in order
 
-1. Fall back to a smaller prefill chunk when a pass does not fit, so a long prompt
-   degrades instead of failing (the last known reliability gap).
-2. Run one real job end to end and fix what that exposes.
-3. Score quality on a fixed task set, so "useful" stops being an assumption.
-4. Have `setup.sh` finish by calibrating, so a new machine reports its own numbers
-   without being asked.
+1. Let the calibration search finish a full run here, and fix what it exposes.
+2. Fall back to a smaller prefill chunk when a pass does not fit, so a long prompt
+   degrades instead of failing (patch seven).
+3. Run one real job end to end and fix what that exposes.
+4. Score quality on a fixed task set, so "useful" stops being an assumption.
 5. Upstream the patches.

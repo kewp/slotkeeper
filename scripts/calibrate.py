@@ -356,6 +356,8 @@ def search(args):
     print(f"\n=== settling on {chosen_window:,} at {target:.1f} GB", flush=True)
     restart(chosen_window, target)
     ctl("profile", str(chosen_window))
+    # The measured target supersedes any share we picked by hand earlier.
+    set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
     LAST_GOOD["dirty"] = False
 
     good = [r for r in window_rows if r["ok"] and r.get("prompt_tokens")]
