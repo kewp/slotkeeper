@@ -23,6 +23,9 @@
 #   uninstall-agent     Unload and remove the LaunchAgent.
 #   bar <install|uninstall|restart|status> Menu-bar app at login (local.slotkeeper-bar); builds it first.
 #   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (local.slotkeeper-monitor).
+#   jobs <add|list|show|cancel|run|report>  Unattended coding tasks for the local model (scripts/jobs.py).
+#   jobs daemon <start|stop|status>         Run queued jobs overnight as a LaunchAgent.
+#   jobs <pause [reason]|resume>            Hold the runner without unloading it.
 #   exerciser <start|stop|pause [reason]|resume|status|report>
 #                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
@@ -335,15 +338,18 @@ cmd_uninstall_agent() {
 agent_installed() { launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1; }
 
 install_side_agent() {
-  # $1 label, $2 program (absolute), $3 log file
+  # $1 label, $2 program (absolute), $3 log file, $4... arguments for the program
   local label="$1" program="$2" logfile="$3" plist="$HOME/Library/LaunchAgents/$1.plist"
+  shift 3
+  local arg args_xml=""
+  for arg in "$@"; do args_xml="$args_xml<string>$arg</string>"; done
   mkdir -p "$HOME/Library/LaunchAgents"
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$program</string></array>
+  <key>ProgramArguments</key><array><string>$program</string>$args_xml</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
@@ -351,7 +357,7 @@ install_side_agent() {
   <key>StandardErrorPath</key><string>$logfile</string>
   <key>EnvironmentVariables</key><dict>
     <key>HOME</key><string>$HOME</string>
-    <key>PATH</key><string>/Library/Frameworks/Python.framework/Versions/3.13/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$HOME/.opencode/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>ProcessType</key><string>${SIDE_AGENT_TYPE:-Background}</string>
   <key>Nice</key><integer>${SIDE_AGENT_NICE:-10}</integer>
@@ -390,6 +396,23 @@ cmd_bar() {
     uninstall) remove_side_agent "$label"; pkill -x Slotkeeper 2>/dev/null || true ;;
     status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x Slotkeeper | head -1 | sed 's/^/pid /')" ;;
     *) die "bar install|uninstall|restart|status" ;;
+  esac
+}
+
+cmd_jobs() {
+  # Unattended coding tasks. The queue commands belong to jobs.py; only the daemon is ours.
+  local label="local.slotkeeper-jobs"
+  case "${1:-list}" in
+    daemon)
+      case "${2:-status}" in
+        start) install_side_agent "$label" "$SCRIPT_DIR/jobs.py" "$SLOTSTREAM_HOME/jobs.log" daemon ;;
+        stop) remove_side_agent "$label" ;;
+        status) echo "jobs daemon: $(agent_installed "$label" && echo "launchd" || echo "not installed")" ;;
+        *) die "jobs daemon start|stop|status" ;;
+      esac ;;
+    pause) mkdir -p "$SLOTSTREAM_HOME/jobs"; echo "${2:-paused by user}" > "$SLOTSTREAM_HOME/jobs/jobs.pause"; log "job runner paused (${2:-paused by user}); finishes the current job first" ;;
+    resume) rm -f "$SLOTSTREAM_HOME/jobs/jobs.pause"; log "job runner resumed" ;;
+    *) exec "$SCRIPT_DIR/jobs.py" "$@" ;;
   esac
 }
 
@@ -436,6 +459,7 @@ case "${1:-}" in
   uninstall-agent) cmd_uninstall_agent ;;
   bar) cmd_bar "${2:-status}" ;;
   monitor) cmd_monitor "${2:-status}" ;;
+  jobs) cmd_jobs "${@:2}" ;;
   exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
   *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
