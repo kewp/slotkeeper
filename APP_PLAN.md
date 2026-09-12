@@ -25,7 +25,9 @@ stage useful on its own.
 - Dashboard as the main window with tabs. 2026-09-12: three exist — Your work
   (your OpenCode requests, read through `scripts/report.py --requests`), Jobs
   (queue and results from `~/.slotstream/jobs`), System (cache, pressure and the
-  synthetic suite). Still to come: Experiments, Server and Health tabs.
+  synthetic suite). 2026-09-12 also added Server (patch status, releases, log viewer) and Health
+  (services, disk, battery, sleep assertion, stuck pressure level). Still to
+  come: an Experiments tab.
 - Requests tab: every request from any client in one table, from the plugin's
   structured log (`~/.local/share/opencode/log`, service `model-stats`) and the
   exerciser rows. Columns: source, agent, prompt/cached/output tokens, TTFT,

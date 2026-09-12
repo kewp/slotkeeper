@@ -13,6 +13,12 @@ struct DashboardView: View {
     @State private var newJobTask = ""
     @State private var newJobAuto = false
     @State private var jobActionNote: String?
+    @State private var patchStatus = ""
+    @State private var releases = ""
+    @State private var logTail = ""
+    @State private var logFilter = ""
+    @State private var health: [String] = []
+    @State private var stuckPressureNote = ""
     @State private var hours = 24.0
 
     var body: some View {
@@ -33,6 +39,10 @@ struct DashboardView: View {
                     .tabItem { Text("Jobs") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { systemTab }.padding(20) }
                     .tabItem { Text("System") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { serverTab }.padding(20) }
+                    .tabItem { Text("Server") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { healthTab }.padding(20) }
+                    .tabItem { Text("Health") }
             }
         }
         .frame(minWidth: 860, minHeight: 720)
@@ -156,6 +166,151 @@ struct DashboardView: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// What is installed and what to do when it misbehaves.
+    private var serverTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Installed build") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(patchStatus.isEmpty ? "reading…" : patchStatus).font(.system(.callout, design: .monospaced))
+                    Text("Rebuild after changing patches/: scripts/slotkeeper patch").font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Releases") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(releases.isEmpty ? "reading…" : releases).font(.system(.caption, design: .monospaced))
+                    Text("Roll back with: scripts/install-release.sh --rollback <name>, then scripts/slotkeeper restart")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Server log") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        TextField("filter (e.g. failed, pressure, kept)", text: $logFilter).frame(width: 260)
+                        Button("Reload") { loadServerTab() }
+                        Spacer()
+                        Button("Open in Console") { NSWorkspace.shared.open(DashboardView.serverLog) }
+                    }
+                    ScrollView {
+                        Text(filteredLog).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(height: 260)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear(perform: loadServerTab)
+    }
+
+    /// The things that quietly break a server meant to run for weeks.
+    private var healthTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Background services") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(DashboardView.agents, id: \.label) { agent in
+                        let installed = FileManager.default.fileExists(
+                            atPath: NSHomeDirectory() + "/Library/LaunchAgents/\(agent.label).plist")
+                        Text("\(installed ? "✓" : "✗")  \(agent.name) — \(installed ? agent.label : "not installed")")
+                            .foregroundStyle(installed ? .primary : .secondary)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Machine") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(health, id: \.self) { Text($0) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Stuck pressure level") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(stuckPressureNote)
+                    Text("A level that stays elevated while memory is free used to refuse every request; "
+                        + "the installed patches cross-check reclaimable memory, so this is now a warning, not an outage.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear(perform: loadHealth)
+    }
+
+    static let agents: [(name: String, label: String)] = [
+        ("Slotstream server", "local.slotkeeper"),
+        ("Metrics monitor", "local.slotkeeper-monitor"),
+        ("Exerciser", "local.slotkeeper-exerciser"),
+        ("Job runner", "local.slotkeeper-jobs"),
+        ("Menu bar app", "local.slotkeeper-bar"),
+    ]
+
+    static var serverLog: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/slotstream.log")
+    }
+
+    private var filteredLog: String {
+        let lines = logTail.split(separator: "\n").map(String.init)
+        let wanted = logFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        let kept = wanted.isEmpty ? lines : lines.filter { $0.lowercased().contains(wanted) }
+        return kept.suffix(200).joined(separator: "\n")
+    }
+
+    private func loadServerTab() {
+        patchStatus = DashboardView.runCtl(["patch", "--status"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        releases = DashboardView.runScript("install-release.sh", ["--list"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let handle = try? FileHandle(forReadingFrom: DashboardView.serverLog) {
+            defer { try? handle.close() }
+            let size = (try? handle.seekToEnd()) ?? 0
+            try? handle.seek(toOffset: size > 200_000 ? size - 200_000 : 0)
+            let data = (try? handle.readToEnd()) ?? Data()
+            logTail = String(data: data, encoding: .utf8) ?? ""
+        }
+    }
+
+    private func loadHealth() {
+        var out: [String] = []
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = (attrs[.systemFreeSize] as? NSNumber)?.doubleValue {
+            let gib = free / 1_073_741_824
+            out.append(String(format: "disk free %.0f GiB%@", gib, gib < 6 ? "  ⚠︎ below the 6 GiB floor the control script enforces" : ""))
+        }
+        let batt = DashboardView.shell("/usr/bin/pmset", ["-g", "batt"])
+        out.append(batt.contains("discharging")
+            ? "on battery — the exerciser and job runner hold off until it is back on AC"
+            : "on AC power")
+        let assertions = DashboardView.shell("/usr/bin/pmset", ["-g", "assertions"])
+        out.append(assertions.contains("PreventUserIdleSystemSleep           1")
+            ? "sleep held off while the server runs (caffeinate)"
+            : "no sleep assertion held — a long job can be cut short by idle sleep")
+        health = out
+        let level = DashboardView.shell("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = ["1": "normal", "2": "warning", "4": "critical"][level] ?? level
+        let free = DashboardView.shell("/usr/bin/memory_pressure", []).split(separator: "\n")
+            .first(where: { $0.contains("free percentage") })?.split(separator: ":").last?
+            .trimmingCharacters(in: .whitespaces) ?? "?"
+        stuckPressureNote = level == "1"
+            ? "kernel level normal, \(free) free"
+            : "kernel level \(name) with \(free) free" + (Int(free.replacingOccurrences(of: "%", with: "")) ?? 0 > 50
+                ? " — elevated while memory is free; reset with: sudo memory_pressure -l normal" : "")
+    }
+
+    static func shell(_ path: String, _ args: [String]) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe()
+        do { try task.run() } catch { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    static func runCtl(_ args: [String]) -> String {
+        let ctl = StatusModel.settings["SLOTSTREAM_CTL"] ?? NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper"
+        return shell("/bin/bash", [ctl] + args)
+    }
+
+    static func runScript(_ name: String, _ args: [String]) -> String {
+        let dir = URL(fileURLWithPath: reportPath).deletingLastPathComponent()
+        return shell("/bin/bash", [dir.appendingPathComponent(name).path] + args)
     }
 
     /// Unattended tasks: what is waiting, what ran, and a way to add one without the terminal.

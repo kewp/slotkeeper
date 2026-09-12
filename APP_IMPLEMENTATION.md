@@ -308,7 +308,15 @@ Goal: one table of every request, from any client.
   `memory pressure` lines.
 - Support bundle button (exists in the menu).
 
-### B4. Health tab (est. half a day)
+### B4. Health tab (done 2026-09-12)
+
+Shipped: LaunchAgent rows for all five services, disk free against the 6 GiB
+floor, battery and what yields on it, the sleep assertion, and a stuck-level
+note that prints the reset command when the kernel level is elevated while
+memory is free. The Server tab alongside it shows `patch --status`, the release
+list with the rollback command, and a filterable tail of the server log.
+
+Original plan:
 
 - LaunchAgent rows: server, monitor, exerciser, bar; installed/loaded/pid.
 - Disk free with the 6 GiB floor, battery state and the pause policy.

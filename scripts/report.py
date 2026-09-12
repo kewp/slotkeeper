@@ -152,7 +152,10 @@ def opencode_requests(since):
             # 3,562 of these in three minutes against the server. A failure, not a request.
             err = "empty"
         row = {"id": mid, "session": sid, "agent": d.get("agent"), "ts": created, "prompt": prompt, "output": output,
-               "ttft_s": ttft, "decode_tok_s": round(output / decode_s, 2) if decode_s and output > 1 else None,
+               # A tool-call message emits a few tokens in a fraction of a second, which divides
+               # out to a decode rate the model cannot reach. Only rate real generations.
+               "ttft_s": ttft, "decode_tok_s": (round(output / decode_s, 2)
+                                                if decode_s and decode_s >= 2 and output >= 16 else None),
                "total_s": (done - created) / 1000 if done and created else None, "error": err, "followup": followup,
                "cwd": (d.get("path") or {}).get("cwd")}
         extra = plugin.get(mid)

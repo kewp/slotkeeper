@@ -15,9 +15,10 @@ What you get:
   log rotation, support bundle, release install with rollback.
 - **Menu-bar app** (`Slotkeeper/`, the Swift package): state, memory pressure, expert cache,
   the request in flight with prefill progress, the background tests, and a
-  dashboard window that opens with your own OpenCode requests (prompt size,
-  time to first token, whether each turn reused its prefix) and then the
-  charts from the synthetic suite.
+  dashboard window with five tabs: your own OpenCode requests (prompt size,
+  time to first token, whether each turn reused its prefix), the job queue,
+  the synthetic suite's charts, the installed build with its log, and a health
+  page for the background services, disk, battery and pressure level.
 - **Continuous exerciser** (`scripts/exerciser.py`): a rotating suite of
   realistic and adversarial tasks that measures cost and behaviour around the
   clock, yields to your own requests and to battery, and can be paused from
