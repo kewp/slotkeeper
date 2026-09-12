@@ -222,12 +222,12 @@ def main():
     since = datetime.now(timezone.utc) - timedelta(hours=a.hours)
 
     if a.requests:
-        rows = []
+        out = []
         for r in opencode_requests(since):
             row = dict(r)
             row["ts"] = datetime.fromtimestamp(r["ts"] / 1000, timezone.utc).isoformat(timespec="seconds") if r["ts"] else None
-            rows.append(row)
-        print(json.dumps(rows, indent=2 if not a.json else None))
+            out.append(row)
+        print(json.dumps(out, indent=2 if not a.json else None))
         return
 
     ex = [r for r in rows(os.path.join(M, "exerciser.jsonl")) if (ts(r) or since) >= since]
