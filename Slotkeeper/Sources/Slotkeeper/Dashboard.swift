@@ -22,6 +22,7 @@ struct DashboardView: View {
     @State private var health: [String] = []
     @State private var stuckPressureNote = ""
     @State private var liveWasActive = false
+    @State private var liveExpanded = false
     @State private var hours = 24.0
 
     var body: some View {
@@ -36,6 +37,8 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 20).padding(.top, 16)
             TabView {
+                ScrollView { VStack(alignment: .leading, spacing: 18) { live; overview }.padding(20) }
+                    .tabItem { Text("Overview") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
                     .tabItem { Text("Your work") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
@@ -137,41 +140,138 @@ struct DashboardView: View {
 
     /// The request happening right now, from the plugin's marker and the server log.
     private var live: some View {
-        GroupBox(status.activeRequest == nil ? "Nothing in flight" : "In flight now") {
-            VStack(alignment: .leading, spacing: 8) {
-                if let req = status.activeRequest {
-                    Text(req.source).font(.headline)
-                    if let fraction = livePrefillFraction {
-                        ProgressView(value: fraction) {
-                            Text(livePrefillLabel).font(.caption)
+        GroupBox {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Circle().fill(status.activeRequest == nil ? Color.secondary : Color.green).frame(width: 8, height: 8)
+                    Text(status.activeRequest.map { "In flight: " + $0.source } ?? "Server idle").font(.headline)
+                    Spacer()
+                    Text(liveSummary).font(.caption).foregroundStyle(.secondary)
+                }
+                if status.activeRequest != nil, let fraction = livePrefillFraction {
+                    ProgressView(value: fraction) { Text(livePrefillLabel).font(.caption) }
+                }
+                DisclosureGroup("details", isExpanded: $liveExpanded) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(status.activeRequest?.lines ?? [], id: \.self) { Text($0).font(.caption) }
+                        ForEach(status.detailLines, id: \.self) { line in
+                            Text(line).font(.caption).foregroundStyle(.secondary)
                         }
-                    }
-                    ForEach(req.lines, id: \.self) { Text($0).font(.callout) }
-                    if let cpu = status.serverCPU {
-                        Text(String(format: "server cpu %.0f%%", cpu)).font(.caption).foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("The server is idle. Your next OpenCode turn shows up here with its prefill progress.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                ForEach(status.detailLines, id: \.self) { line in
-                    Text(line).font(.caption).foregroundStyle(.secondary)
-                }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.font(.caption)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    /// One line of context that stays visible when the details are collapsed.
+    private var liveSummary: String {
+        var bits: [String] = []
+        if let line = status.activeRequest?.lines.first { bits.append(line) }
+        if let cpu = status.serverCPU { bits.append(String(format: "cpu %.0f%%", cpu)) }
+        return bits.joined(separator: "  |  ")
+    }
+
     /// "4096/9125 tokens (45%), ~52 s left" -> 0.45
+    /// Only the server's own progress line means progress: "4096/9125 tokens (45%), ~52 s left".
+    /// The request's own summary also carries a percentage — of the context window — which is
+    /// not progress at all and filled this bar with a meaningless number.
+    private var livePrefillProgressLine: String? {
+        status.activeRequest?.lines.first { $0.contains("/") && $0.contains("tokens (") }
+    }
+
     private var livePrefillFraction: Double? {
-        for line in status.activeRequest?.lines ?? [] {
-            guard let open = line.firstIndex(of: "("), let close = line[open...].firstIndex(of: "%") else { continue }
-            if let value = Double(line[line.index(after: open)..<close]) { return value / 100 }
-        }
-        return nil
+        guard let line = livePrefillProgressLine,
+              let open = line.range(of: "tokens ("), let close = line[open.upperBound...].firstIndex(of: "%")
+        else { return nil }
+        return Double(line[open.upperBound..<close]).map { $0 / 100 }
     }
 
     private var livePrefillLabel: String {
-        status.activeRequest?.lines.first(where: { $0.contains("tokens") }) ?? "reading the prompt"
+        livePrefillProgressLine ?? "reading the prompt"
+    }
+
+    /// The one-screen answer to "how is it going": how long it has been up, what it has
+    /// served, how the memory has behaved, and what is waiting.
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Right now") {
+                HStack(alignment: .top, spacing: 28) {
+                    ForEach(headlineStats, id: \.label) { stat in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(stat.value).font(.title3).bold()
+                            Text(stat.label).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Memory and cache over this window") {
+                Chart {
+                    ForEach(monitor) { s in
+                        if let free = s.freePercent {
+                            AreaMark(x: .value("Time", s.ts), y: .value("free %", free))
+                                .foregroundStyle(.blue.opacity(0.12))
+                        }
+                    }
+                    ForEach(monitor) { s in
+                        if let e = s.experts {
+                            LineMark(x: .value("Time", s.ts), y: .value("experts/layer", e))
+                                .foregroundStyle(.orange).interpolationMethod(.stepEnd)
+                        }
+                    }
+                    ForEach(pressureSpans, id: \.start) { span in
+                        RectangleMark(xStart: .value("from", span.start), xEnd: .value("to", span.end))
+                            .foregroundStyle(span.level == "critical" ? .red.opacity(0.18) : .orange.opacity(0.15))
+                    }
+                }
+                .chartYAxisLabel("free % (area) and experts/layer (line)")
+                .frame(height: 170)
+                Text("Shaded: the kernel reported warning (orange) or critical (red) pressure. "
+                    + "The line is the expert cache the governor chose to hold.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            GroupBox("Turn time over this window") {
+                Chart(requests.filter { $0.ttft != nil && $0.error == nil }) { r in
+                    PointMark(x: .value("when", r.ts), y: .value("TTFT s", r.ttft!))
+                        .foregroundStyle(by: .value("turn", r.followup ? "follow-up" : "cold"))
+                }
+                .chartYAxisLabel("seconds to first token")
+                .frame(height: 150)
+                Text("Each dot is one of your turns. A follow-up that jumps to cold territory means the "
+                    + "conversation was dropped from the prefix cache and re-read.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private struct Stat { var label: String; var value: String }
+
+    private var headlineStats: [Stat] {
+        let answered = requests.filter { $0.error == nil }
+        let failed = requests.filter { $0.error != nil && $0.error != "in flight" }
+        let busy = answered.compactMap(\.ttft).reduce(0, +) / 3600
+        let reuse = median(requests.compactMap(\.cacheHitRate))
+        let pressureMinutes = Double(monitor.filter { $0.pressure != "normal" }.count) * 0.5
+        return [
+            Stat(label: "server uptime", value: uptimeText),
+            Stat(label: "your turns", value: "\(answered.count)" + (failed.isEmpty ? "" : " (\(failed.count) failed)")),
+            Stat(label: "median turn", value: median(answered.compactMap(\.ttft)).map { String(format: "%.0f s", $0) } ?? "–"),
+            Stat(label: "prompt reused", value: reuse.map { String(format: "%.0f%%", $0) } ?? "–"),
+            Stat(label: "waiting on prefill", value: String(format: "%.1f h", busy)),
+            Stat(label: "pressure", value: pressureMinutes > 0 ? String(format: "%.0f min", pressureMinutes) : "none"),
+            Stat(label: "jobs", value: jobs.isEmpty ? "none" : "\(jobs.filter { $0.result == "queued" }.count) queued"),
+        ]
+    }
+
+    private var uptimeText: String {
+        let out = DashboardView.shell("/bin/ps", ["-o", "etime=", "-p", serverPID])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? "stopped" : out
+    }
+
+    private var serverPID: String {
+        DashboardView.shell("/usr/bin/pgrep", ["-f", "slotstream serve"])
+            .split(separator: "\n").first.map(String.init) ?? "0"
     }
 
     /// Your own OpenCode work, which is the point of the whole setup. Read through
@@ -469,7 +569,9 @@ struct DashboardView: View {
                     guard let d = line.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                           let ts = (o["ts"] as? String).flatMap(date), ts >= since else { continue }
                     let ss = o["slotstream"] as? [String: Any]
-                    samples.append(MonitorSample(ts: ts, pressure: o["pressure"] as? String ?? "unknown", experts: ss?["experts_per_layer"] as? Int))
+                    samples.append(MonitorSample(ts: ts, pressure: o["pressure"] as? String ?? "unknown",
+                                                 experts: ss?["experts_per_layer"] as? Int,
+                                                 freePercent: o["free_percent"] as? Double ?? (o["free_percent"] as? Int).map(Double.init)))
                 }
             }
         }
@@ -611,6 +713,7 @@ struct MonitorSample: Identifiable {
     var ts: Date
     var pressure: String
     var experts: Int?
+    var freePercent: Double?
 }
 
 struct ExerciserRun: Identifiable {

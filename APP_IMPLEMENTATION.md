@@ -187,6 +187,14 @@ misses, evictions, conversations`. `GET /api/ps` → `models[0].size_vram`.
 
 ## 2. App code map (`Slotkeeper/`)
 
+Packaging (2026-09-12): `scripts/build-app.sh` builds the release binary into a
+real bundle at `~/Applications/Slotkeeper.app` with an Info.plist and a rendered
+icon, and `slotkeeper bar install|restart` points the LaunchAgent at the
+executable inside it with `SLOTKEEPER_BACKGROUND=1`, so login start stays quiet
+while opening the app by hand shows the dashboard. The activation policy is
+`.regular`, and `AppDelegate.applicationShouldHandleReopen` brings the window
+back when the Dock icon is clicked.
+
 - `Package.swift`: tools 5.10, macOS 14, `-parse-as-library`.
 - `Sources/Slotkeeper/SlotkeeperApp.swift`: `@main` app with a
   `MenuBarExtra` and a `Window("Slotstream Dashboard", id: "dashboard")`.

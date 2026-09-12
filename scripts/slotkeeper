@@ -21,7 +21,8 @@
 #   bundle              Write a support bundle (versions, plan, logs, memory, metrics) to ~/.slotstream/bundles.
 #   install-agent       Install and load the LaunchAgent (crash restart, log capture).
 #   uninstall-agent     Unload and remove the LaunchAgent.
-#   bar <install|uninstall|restart|status> Menu-bar app at login (local.slotkeeper-bar); builds it first.
+#   bar <install|uninstall|restart|status> Builds Slotkeeper.app into ~/Applications and runs it
+#                       at login (local.slotkeeper-bar). Open it from the Dock, Spotlight or the menu bar.
 #   monitor <start|stop|status>            Metrics sampler as a LaunchAgent (local.slotkeeper-monitor).
 #   jobs <add|list|show|cancel|run|report>  Unattended coding tasks for the local model (scripts/jobs.py).
 #   jobs daemon <start|stop|status>         Run queued jobs overnight as a LaunchAgent.
@@ -357,6 +358,7 @@ install_side_agent() {
   <key>StandardErrorPath</key><string>$logfile</string>
   <key>EnvironmentVariables</key><dict>
     <key>HOME</key><string>$HOME</string>
+    ${SIDE_AGENT_ENV:+<key>${SIDE_AGENT_ENV%%=*}</key><string>${SIDE_AGENT_ENV#*=}</string>}
     <key>PATH</key><string>$HOME/.opencode/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>ProcessType</key><string>${SIDE_AGENT_TYPE:-Background}</string>
@@ -383,15 +385,17 @@ remove_side_agent() {
 }
 
 cmd_bar() {
-  local label="local.slotkeeper-bar" pkg="$SCRIPT_DIR/../Slotkeeper" bin
+  # The app is a real bundle in ~/Applications; the LaunchAgent starts the executable
+  # inside it, so the Dock icon, the menu-bar item and login start are one app.
+  local label="local.slotkeeper-bar" bin
   case "${1:-status}" in
     install|restart)
-      log "building Slotkeeper (release)"
-      (cd "$pkg" && swift build -c release 2>&1 | tail -1)
-      bin="$(cd "$pkg" && swift build -c release --show-bin-path)/Slotkeeper"
-      [[ -x "$bin" ]] || die "build did not produce $bin"
+      bin="$("$SCRIPT_DIR/build-app.sh" | tail -1)"
+      [[ -x "$bin" ]] || die "build-app.sh did not produce an executable"
       pkill -x Slotkeeper 2>/dev/null || true
-      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotkeeper-bar.log"
+      # At login it should stay out of the way; opened by hand it shows its window.
+      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 SIDE_AGENT_ENV="SLOTKEEPER_BACKGROUND=1" \
+        install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotkeeper-bar.log"
       ;;
     uninstall) remove_side_agent "$label"; pkill -x Slotkeeper 2>/dev/null || true ;;
     status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x Slotkeeper | head -1 | sed 's/^/pid /')" ;;

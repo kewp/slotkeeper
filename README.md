@@ -15,10 +15,12 @@ What you get:
   log rotation, support bundle, release install with rollback.
 - **Menu-bar app** (`Slotkeeper/`, the Swift package): state, memory pressure, expert cache,
   the request in flight with prefill progress, the background tests, and a
-  dashboard window with five tabs: your own OpenCode requests (prompt size,
-  time to first token, whether each turn reused its prefix), the job queue,
-  the synthetic suite's charts, the installed build with its log, and a health
-  page for the background services, disk, battery and pressure level.
+  dashboard window. It is a real application in `~/Applications/Slotkeeper.app`
+  (Dock icon, Spotlight, Cmd-Shift-D), with six tabs: an overview (uptime, turns, median
+  turn, how much of each prompt was reused, memory and cache history), your
+  OpenCode requests turn by turn, the job queue, the synthetic suite's charts,
+  the installed build with its log, and a health page for the background
+  services, disk, battery and pressure level.
 - **Continuous exerciser** (`scripts/exerciser.py`): a rotating suite of
   realistic and adversarial tasks that measures cost and behaviour around the
   clock, yields to your own requests and to battery, and can be paused from
@@ -42,7 +44,9 @@ OpenCode 1.18.30. Expect rough edges elsewhere and read the traps in
 - OpenCode.
 - `python3` (3.9+), `jq`, Node.js and npm. `brew install jq node` covers the
   missing ones.
-- Xcode or the Command Line Tools if you want the menu-bar app (`swift`).
+- Xcode or the Command Line Tools if you want the app (`swift`). Build it with
+  `scripts/build-app.sh`, which installs `~/Applications/Slotkeeper.app`; it is
+  unsigned, so macOS asks the first time you open it.
 
 ## Quick start
 
