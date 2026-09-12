@@ -64,6 +64,31 @@ reasoning; this is the state.
   sweep at 16K, 32K, 48K, 56K running on a corpus of this repo plus
   Slotstream's Swift sources. `~/.slotstream/profile` is now `deep`.
 
+## Where the limits actually are (measured 2026-09-12)
+
+The planner's ledger, read from the running server at a 49,152 window, in GB:
+fixed footprint 5.30, planning margin 1.00, context state above 32K 0.45,
+long-context transient reserve 0.91, prefill workspace 1.33, retained
+conversation 1.70, expert pool 3.48, expected peak 13.17.
+
+Scaling the context-proportional terms to 65,536 gives 12.50 GB before a single
+expert is cached, so the smallest possible plan is 14.27 GB against a 14.2 GB
+target at the 55% cap: infeasible at the pool floor. That is why a real session
+died there with "the configured context no longer fits current availability",
+and why shedding retention (2.15 GB at 65K) makes it fit again.
+
+A second, independent wall is the live per-pass check during a long prefill.
+At a 49,152 window with 26 experts/layer, a 35,653-token prompt asked for
+7.9 to 8.9 GB against about 8.0 GB available and was refused three times, with
+the machine at normal pressure. Live availability, not the plan, decides it.
+
+Resume works and is measured: attempt 1 spent 438 s and stopped at 25,600
+committed tokens; attempt 2 read only 9,768 more and cost 59 s; attempt 3 read
+6,696 and cost 20 s, reaching 29,696. Prefix hits went 0, 1, 2. Each retry is
+far cheaper than the first attempt, but the requirement grows with position, so
+this configuration ratchets to about 30K and stalls rather than finishing. The
+fix for completion is headroom: a smaller pool, i.e. a lower RAM cap.
+
 ## Path to a 131K background coding agent (Karl's goal, 2026-09-11)
 
 Goal: a coding agent with a 131K window that runs overnight or in the
