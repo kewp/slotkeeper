@@ -241,11 +241,18 @@ struct DashboardView: View {
                         if let bar = p.fractionDone {
                             ProgressView(value: bar) { Text(p.step).font(.caption) }
                         }
+                        ForEach(p.attempts) { attempt in
+                            HStack(spacing: 8) {
+                                Text(attempt.symbol).foregroundStyle(attempt.good ? .green : .secondary)
+                                Text(attempt.what).frame(width: 210, alignment: .leading)
+                                Text(attempt.result).foregroundStyle(.secondary)
+                            }.font(.caption)
+                        }
                         ForEach(p.rows) { row in
                             HStack(spacing: 8) {
                                 Text(row.ok ? "✓" : "✗").foregroundStyle(row.ok ? .green : .red)
-                                Text("\(row.window / 1000)K window").foregroundStyle(.secondary)
-                                Text("\(row.size.formatted()) tokens")
+                                Text("\(row.window / 1000)K window, \(row.size.formatted()) tokens")
+                                    .frame(width: 210, alignment: .leading)
                                 Text(row.detail).foregroundStyle(.secondary)
                             }.font(.caption)
                         }
@@ -338,12 +345,17 @@ struct DashboardView: View {
             }
             WindowCostTable(rows: budgetWindows)
             MachineTable(rows: budgetMachines)
-            GroupBox("What the sweeps measured") {
+            GroupBox("Every prompt size we have tried") {
                 if sweeps.isEmpty {
-                    Text("no sweeps recorded in this window").font(.callout).foregroundStyle(.secondary)
+                    Text("nothing measured in this window yet").font(.callout).foregroundStyle(.secondary)
                 } else {
+                    Text("Each row is one prompt sent at one configuration. Runs are labelled, and a "
+                        + "failure in an older run says what that configuration could not do, not what "
+                        + "the current one cannot.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Table(sweeps) {
-                        TableColumn("run") { Text($0.label) }.width(120)
+                        TableColumn("when") { Text($0.ts.formatted(date: .omitted, time: .shortened)) }.width(60)
+                        TableColumn("run") { Text($0.label.isEmpty ? "–" : $0.label) }.width(120)
                         TableColumn("prompt") { Text($0.prompt.map { $0.formatted() } ?? "–") }.width(70)
                         TableColumn("result") { r in
                             Text(r.ok ? "ok" : (r.errorCode ?? "failed")).foregroundStyle(r.ok ? .green : .red)
@@ -372,8 +384,10 @@ struct DashboardView: View {
                       rate, cold, 500 / rate, decode, decode > 0 ? 300 / decode : 0)
     }
 
+    /// Newest first: the current configuration's evidence should be at the top.
     private var sweeps: [ExerciserRun] {
-        runs.filter { $0.task.hasPrefix("sweep-") }.sorted { $0.ts < $1.ts }
+        runs.filter { $0.task.hasPrefix("sweep-") || $0.task.hasPrefix("calibrate-") }
+            .sorted { $0.ts > $1.ts }
     }
 
     private var budgetWindows: [BudgetTables.WindowRow] { budget?.windows ?? [] }
@@ -918,11 +932,29 @@ struct CalibrationProgress {
         }
     }
 
+    struct Attempt: Identifiable {
+        var id: String { "\(kind)-\(window)-\(targetGB)-\(at)" }
+        var kind: String
+        var window: Int
+        var targetGB: Double
+        var result: String
+        var at: String
+        var good: Bool { result.hasPrefix("works") || result.contains("accepted") }
+        var symbol: String { good ? "✓" : "·" }
+        var what: String {
+            kind == "memory target"
+                ? String(format: "%.1f GB memory target", targetGB)
+                : "\(window.formatted()) window at \(String(format: "%.1f", targetGB)) GB"
+        }
+    }
+
     var phase: String
     var window: Int?
     var size: Int?
+    var targetGB: Double?
     var windows: [Int]
     var rows: [Row]
+    var attempts: [Attempt]
 
     init?(file: URL) {
         guard let data = try? Data(contentsOf: file),
@@ -931,16 +963,23 @@ struct CalibrationProgress {
         window = o["window"] as? Int
         size = o["size"] as? Int
         windows = o["windows"] as? [Int] ?? []
+        targetGB = o["target_gb"] as? Double
         rows = (o["rows"] as? [[String: Any]] ?? []).map {
             Row(window: $0["window"] as? Int ?? 0, size: $0["size"] as? Int ?? 0,
                 ok: $0["ok"] as? Bool ?? false, ttft: $0["ttft_s"] as? Double,
                 error: $0["error"] as? String)
+        }
+        attempts = (o["attempts"] as? [[String: Any]] ?? []).map {
+            Attempt(kind: $0["kind"] as? String ?? "", window: $0["window"] as? Int ?? 0,
+                    targetGB: $0["target_gb"] as? Double ?? 0,
+                    result: $0["result"] as? String ?? "", at: $0["at"] as? String ?? "")
         }
     }
 
     var headline: String {
         guard let w = window else { return phase }
         var line = "testing a \(w.formatted()) window"
+        if let t = targetGB { line += String(format: " at a %.1f GB memory target", t) }
         if windows.count > 1, let index = windows.firstIndex(of: w) {
             line += " (\(index + 1) of \(windows.count) to try)"
         }

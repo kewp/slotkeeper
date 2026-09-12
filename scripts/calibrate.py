@@ -170,6 +170,19 @@ def progress(**fields):
         pass
 
 
+def note_attempt(**fields):
+    """Record one configuration we tried and how it went, for the app to show live."""
+    tried = []
+    if os.path.exists(PROGRESS):
+        try:
+            with open(PROGRESS) as f:
+                tried = json.load(f).get("attempts", [])
+        except ValueError:
+            tried = []
+    tried.append({**fields, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    progress(attempts=tried[-20:])
+
+
 def clear_progress():
     try:
         os.remove(PROGRESS)
@@ -305,14 +318,20 @@ def search(args):
                  window=reference_window, size=None)
         if not restart(reference_window, candidate):
             notes.append(f"{candidate:.1f} GB: server would not start")
+            note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
+                         result="too much for this machine: the server would not start")
             continue
         print(f"  {int(reference_window * 0.5):,} tokens…", end=" ", flush=True)
         row = probe(exerciser, reference_window, int(reference_window * 0.5) // 1000 * 1000, candidate, rows)
         if row["ok"] and not row["critical_pressure"]:
             target = candidate
+            note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
+                         result=f"works: {row['ttft_s']:.0f} s to first token" if row.get("ttft_s") else "works")
             print(f"  {candidate:.1f} GB works", flush=True)
             break
-        notes.append(f"{candidate:.1f} GB: " + (row.get("error") or "the machine went to critical pressure"))
+        reason = row.get("error") or "the machine went to critical pressure"
+        notes.append(f"{candidate:.1f} GB: {reason}")
+        note_attempt(kind="memory target", target_gb=candidate, window=reference_window, result=reason)
     if target is None:
         print("no memory target served a prompt; is the server healthy?", file=sys.stderr)
         progress(phase="no memory target worked")
@@ -329,6 +348,8 @@ def search(args):
         progress(phase="testing this window", window=window, target_gb=target, size=None)
         if not restart(window, target):
             notes.append(f"window {window:,}: server would not start at {target:.1f} GB")
+            note_attempt(kind="window", window=window, target_gb=target,
+                         result="does not fit in this memory target")
             continue
         here = []
         for fraction in fractions:
@@ -339,7 +360,11 @@ def search(args):
             if not row["ok"] and row["error"] == "insufficient_memory":
                 break
         good = [r for r in here if r["ok"] and r.get("prompt_tokens")]
-        if good and max(r["prompt_tokens"] for r in good) >= window * 0.7:
+        largest_here = max((r["prompt_tokens"] for r in good), default=0)
+        note_attempt(kind="window", window=window, target_gb=target,
+                     result=(f"carried {largest_here:,} tokens" if largest_here else "carried nothing")
+                            + (" — accepted" if largest_here >= window * 0.7 else ""))
+        if good and largest_here >= window * 0.7:
             chosen_window, window_rows = window, here
             break
         notes.append(f"window {window:,}: carried only "
