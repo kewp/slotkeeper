@@ -23,7 +23,9 @@ is a constant someone chose, and this project has already changed seven of them.
 | Prefill chunk | `SLOTSTREAM_PREFILL_CHUNK` | Default, then 512, then 256. A smaller pass needs far less transient memory, which is what a long prompt runs out of. |
 | Prefill-wait budget | `slotkeeper` `prefill_wait_for` | Scales with the window: twice the estimated full-window prefill. A fixed ten minutes silently capped prompts at about 24K. |
 | Expert cache size | the planner, from the target | Follows the memory target; the governor resizes it live. |
+| A hand-picked RAM share | `SLOTSTREAM_MAX_RAM_PERCENT` | Deleted at the start of every calibration run, not at the end, so an interrupted run cannot leave yesterday's workaround in force. The 55% on this machine was one such workaround and is gone. |
 | Longest test prompt | `EXERCISER_MAX_PROMPT`, `--sweep auto` | Derived from the server's window, not a constant. |
+| Metal working set | `SLOTSTREAM_WORKING_SET_GB` → `Planner.deviceWorkingSetGB` | `maxRecommendedWorkingSetSize` is a recommendation, about 75% of RAM, and the planner treated it as a hard bound on the peak, leaving the rest of the machine unused. Patch eight makes it settable; the ladder's last two rungs go 4 GB and 8 GB past it and the probe after says whether it was worth it. |
 | Safety headroom | `SLOTSTREAM_AVAILABILITY_SLACK_GB` → `Planner.availabilitySlackGB` | Default 5% of RAM, at least 1.5 GB, which was a policy nobody had measured. Patch seven makes it settable; the ladder trades it last, in steps to 0.75 GB and 0.25 GB, and only after retention and pass size. |
 
 ## Patched
@@ -55,5 +57,4 @@ is a constant someone chose, and this project has already changed seven of them.
 | Minimum expert pool (`Geometry.floorSlots`, 640 slots, 1.77 GB) | A floor tied to the prefill chunk: below it one pass can pin every slot. With a 256-token chunk it could be lower, which would free memory for the window. Candidate for patch eight; not yet measured. |
 | Per-pass admission refusal | A long prompt is refused when one pass does not fit, rather than the pass being made smaller. Patch seven: fall back to a smaller chunk in place, instead of failing the request. |
 | The 1 GB planning margin | A guard against the machine becoming unusable, not yet settable. Measure whether it can be smaller before making it another rung. |
-| Metal working set (`device_working_set_gb`, about 75% of RAM) | The planner bounds a plan's peak by it. macOS reports it as a recommendation, not a hard wall, so a target above it is worth measuring rather than assuming; the search now tries targets above it and records what the server says. |
 | What else is running | A target that fails while a browser holds memory can succeed on a quiet machine: 17.3 GB was refused at 10:47 and started at 11:06. The verdict records the machine's state, and calibration prefers to run when you are away. |

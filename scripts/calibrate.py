@@ -289,6 +289,16 @@ def set_env(key, value):
         os.environ[key] = str(value)
 
 
+def working_set_value(spec):
+    """"+4" means four GB past what Metal recommends on this machine."""
+    if not spec:
+        return None
+    if str(spec).startswith("+"):
+        _, working_set = _machine()
+        return f"{working_set + float(str(spec)[1:]):.1f}"
+    return str(spec)
+
+
 def server_refusal():
     """What the server actually said when it declined to start."""
     log = os.path.join(HOME, "slotstream.log")
@@ -316,10 +326,17 @@ LADDER = [
     {"retention": "full", "chunk": None, "slack": "0.75", "gives_up": "most of the safety headroom"},
     {"retention": "32768", "chunk": "512", "slack": "0.75", "gives_up": "most of the headroom and the pass size"},
     {"retention": None, "chunk": "256", "slack": "0.25", "gives_up": "nearly all the headroom, with the smallest pass"},
+    # Metal's recommended working set is the last bound we question, because going past it
+    # is where the machine can start paging its own graphics memory. The probe after this
+    # rung is what says whether it was worth it.
+    {"retention": "full", "chunk": None, "slack": None, "working_set": "+4",
+     "gives_up": "4 GB past Metal's recommended working set"},
+    {"retention": "32768", "chunk": "512", "slack": "0.75", "working_set": "+8",
+     "gives_up": "8 GB past the recommendation, with a smaller pass and less headroom"},
 ]
 
 
-def restart(window, target_gb, retention=None, chunk=None, slack=None):
+def restart(window, target_gb, retention=None, chunk=None, slack=None, working_set=None):
     """Bring the server up at one configuration. False when it will not start there.
 
     `retention` is how much conversation the server may keep: "full", a token count,
@@ -330,6 +347,7 @@ def restart(window, target_gb, retention=None, chunk=None, slack=None):
     set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention)
     set_env("SLOTSTREAM_PREFILL_CHUNK", chunk)
     set_env("SLOTSTREAM_AVAILABILITY_SLACK_GB", slack)
+    set_env("SLOTSTREAM_WORKING_SET_GB", working_set_value(working_set))
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
@@ -437,6 +455,12 @@ LAST_GOOD = {"config": None, "dirty": False}
 
 def search(args):
     exerciser = load("exerciser")
+    # A share someone picked by hand is not evidence, and it must not come back if this
+    # run is interrupted. The search decides the memory target from measurement.
+    if os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT"):
+        print(f"dropping the hand-picked {os.environ['SLOTSTREAM_MAX_RAM_PERCENT']}% RAM share; "
+              "the measurement decides the target", flush=True)
+        set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
     ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
     # Try past the qualified envelope too: with the window patch the server accepts it and
     # the planner refuses what does not fit, so the machine decides rather than a constant.
@@ -459,7 +483,7 @@ def search(args):
         print(f"\n=== trying a {candidate:.1f} GB memory target", flush=True)
         progress(phase=f"trying a {candidate:.1f} GB memory target", target_gb=candidate,
                  window=reference_window, size=None)
-        if not restart(reference_window, candidate, retentions[0], None, None):
+        if not restart(reference_window, candidate, retentions[0], None, None, None):
             notes.append(f"{candidate:.1f} GB: server would not start")
             note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
                          result="too much for this machine: the server would not start")
@@ -494,7 +518,8 @@ def search(args):
         # when there is nothing left to give up.
         rung = None
         for candidate in LADDER:
-            if restart(window, target, candidate["retention"], candidate["chunk"], candidate.get("slack")):
+            if restart(window, target, candidate["retention"], candidate["chunk"],
+                       candidate.get("slack"), candidate.get("working_set")):
                 rung = candidate
                 break
             note_attempt(kind="window", window=window, target_gb=target,
@@ -518,7 +543,8 @@ def search(args):
                 for candidate in LADDER[LADDER.index(rung) + 1:]:
                     print(f"  giving up {candidate['gives_up']} and retrying {size:,}…",
                           end=" ", flush=True)
-                    if not restart(window, target, candidate["retention"], candidate["chunk"], candidate.get("slack")):
+                    if not restart(window, target, candidate["retention"], candidate["chunk"],
+                                   candidate.get("slack"), candidate.get("working_set")):
                         continue
                     rung, started_here = candidate, candidate["retention"]
                     row = probe(exerciser, window, size, target, rows, started_here)
@@ -552,10 +578,9 @@ def search(args):
     # 3. Settle there and keep it: the window in the profile, the target in ctl.env.
     print(f"\n=== settling on {chosen_window:,} at {target:.1f} GB", flush=True)
     restart(chosen_window, target, chosen_retention, os.environ.get("SLOTSTREAM_PREFILL_CHUNK"),
-            os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB"))
+            os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB"),
+            os.environ.get("SLOTSTREAM_WORKING_SET_GB"))
     ctl("profile", str(chosen_window))
-    # The measured target supersedes any share we picked by hand earlier.
-    set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
     LAST_GOOD["dirty"] = False
 
     good = [r for r in window_rows if r["ok"] and r.get("prompt_tokens")]
@@ -571,6 +596,7 @@ def search(args):
         "retention": chosen_retention or "the server's default",
         "prefill_chunk": os.environ.get("SLOTSTREAM_PREFILL_CHUNK", "default"),
         "availability_slack_gb": os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB", "default"),
+        "working_set_gb": os.environ.get("SLOTSTREAM_WORKING_SET_GB", "Metal's recommendation"),
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
