@@ -285,7 +285,19 @@ def server_refusal():
     return lines[-1].replace("Error: ", "")[:200] if lines else None
 
 
-def restart(window, target_gb, retention=None):
+# What we give up, in order, to make a window work. Least sacrifice first: the window is
+# what the user gets, so retention and pass size go before it does. See CONSTRAINTS.md.
+LADDER = [
+    {"retention": "full", "chunk": None, "gives_up": "nothing"},
+    {"retention": "32768", "chunk": None, "gives_up": "keeping only 32,768 tokens of conversation"},
+    {"retention": None, "chunk": None, "gives_up": "the server's own small retention"},
+    {"retention": "32768", "chunk": "512", "gives_up": "a 512-token prefill pass"},
+    {"retention": None, "chunk": "512", "gives_up": "a 512-token pass and little retention"},
+    {"retention": None, "chunk": "256", "gives_up": "a 256-token pass, the smallest we run"},
+]
+
+
+def restart(window, target_gb, retention=None, chunk=None):
     """Bring the server up at one configuration. False when it will not start there.
 
     `retention` is how much conversation the server may keep: "full", a token count,
@@ -294,18 +306,19 @@ def restart(window, target_gb, retention=None):
     start where the same window with less retention runs fine."""
     set_env("SLOTSTREAM_MEMORY_GB", f"{target_gb:.1f}" if target_gb else None)
     set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention)
+    set_env("SLOTSTREAM_PREFILL_CHUNK", chunk)
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
-        LAST_GOOD["config"] = (window, target_gb, retention)
-        log_attempt(kind="start", window=window, target_gb=target_gb,
+        LAST_GOOD["config"] = (window, target_gb, retention, chunk)
+        log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
                     retention=retention or "default", ok=True, reason="server started")
         return True
     why = server_refusal() or (out.stderr or out.stdout).strip().splitlines()[-1][:160]
     print(f"    would not start at {target_gb:.1f} GB / {window:,} "
           f"(keeping {retention or 'the default'}): {why}", flush=True)
     RESTART_REASON["why"] = why
-    log_attempt(kind="start", window=window, target_gb=target_gb,
+    log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
                 retention=retention or "default", ok=False, reason=why)
     return False
 
@@ -426,19 +439,21 @@ def search(args):
             pass
         print(f"\n=== window {window:,} at {target:.1f} GB", flush=True)
         progress(phase="testing this window", window=window, target_gb=target, size=None)
-        # Give up retention before giving up the window: the window is what the user gets.
-        started_here = None
-        for retention in retentions:
-            if restart(window, target, retention):
-                started_here = retention
+        # Walk the ladder: give up the cheapest thing first, and only reject the window
+        # when there is nothing left to give up.
+        rung = None
+        for candidate in LADDER:
+            if restart(window, target, candidate["retention"], candidate["chunk"]):
+                rung = candidate
                 break
             note_attempt(kind="window", window=window, target_gb=target,
-                         result=f"keeping {retention or 'the default'}: " + (RESTART_REASON["why"] or "would not start"))
-        if started_here is None:
-            notes.append(f"window {window:,}: no retention setting would start at {target:.1f} GB")
+                         result=f"giving up {candidate['gives_up']}: " + (RESTART_REASON["why"] or "would not start"))
+        if rung is None:
+            notes.append(f"window {window:,}: nothing left to give up at {target:.1f} GB")
             continue
-        if started_here != retentions[0]:
-            print(f"  started by keeping {started_here or 'the default'} instead of the whole conversation", flush=True)
+        started_here = rung["retention"]
+        if rung is not LADDER[0]:
+            print(f"  started by giving up {rung['gives_up']}", flush=True)
         here = []
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
@@ -446,7 +461,24 @@ def search(args):
             row = probe(exerciser, window, size, target, rows, started_here)
             here.append(row)
             if not row["ok"] and row["error"] == "insufficient_memory":
-                break
+                # The prompt, not the plan, ran out of memory. Step down the ladder and
+                # try the same size again before giving up on this window.
+                retried = False
+                for candidate in LADDER[LADDER.index(rung) + 1:]:
+                    print(f"  giving up {candidate['gives_up']} and retrying {size:,}…",
+                          end=" ", flush=True)
+                    if not restart(window, target, candidate["retention"], candidate["chunk"]):
+                        continue
+                    rung, started_here = candidate, candidate["retention"]
+                    row = probe(exerciser, window, size, target, rows, started_here)
+                    here.append(row)
+                    retried = True
+                    if row["ok"]:
+                        break
+                if not row["ok"]:
+                    break
+                if retried:
+                    continue
         good = [r for r in here if r["ok"] and r.get("prompt_tokens")]
         largest_here = max((r["prompt_tokens"] for r in good), default=0)
         note_attempt(kind="window", window=window, target_gb=target,
@@ -485,6 +517,7 @@ def search(args):
         "window": chosen_window,
         "memory_target_gb": target,
         "retention": chosen_retention or "the server's default",
+        "prefill_chunk": os.environ.get("SLOTSTREAM_PREFILL_CHUNK", "default"),
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),

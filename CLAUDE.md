@@ -9,6 +9,11 @@ so.** No tuning by hand, no per-machine advice, no asking the user to try settin
 
 Rules that follow from it, and that beat any earlier decision in this repo:
 
+- **Trace every failure to `CONSTRAINTS.md` before reporting it.** That file lists every
+  limit between us and the machine's real capability, each marked searched, patched or
+  physics. If a failure does not map to a row, the row is missing: add it and decide
+  which it is. Reporting "it failed" without the cause, or naming a cause without saying
+  whether it can be removed, is the mistake this file exists to prevent.
 - **A limit in Slotstream is a work item, not an answer.** We patch Slotstream; there
   are six patches in `patches/` already. Never write or say "we can't, Slotstream caps
   it at X". Write down what the cap is, what it would take to lift it, and lift it when
