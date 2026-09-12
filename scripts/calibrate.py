@@ -36,6 +36,7 @@ CTL = os.path.join(REPO, "scripts", "slotkeeper")
 ACTIVE = os.path.join(HOME, "opencode-active")
 PAUSE = os.path.join(HOME, "calibrate.pause")
 PROGRESS = os.path.join(HOME, "calibration.progress.json")
+ATTEMPTS = os.path.join(HOME, "calibration-attempts.jsonl")
 JOBS = os.path.join(HOME, "jobs", "running")
 STALE_DAYS = 30
 IDLE_MINUTES = 30       # how long you must be away before it takes the server
@@ -170,6 +171,17 @@ def progress(**fields):
         pass
 
 
+def log_attempt(**fields):
+    """Append one attempt to the permanent record, so every run can be compared later."""
+    line = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **fields}
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        with open(ATTEMPTS, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except OSError:
+        pass
+
+
 def note_attempt(**fields):
     """Record one configuration we tried and how it went, for the app to show live."""
     tried = []
@@ -207,6 +219,18 @@ def measure(exerciser, size, label):
     row["ok"] = not row["error"] and bool(result.get("text", "").strip())
     record(exerciser, row, result)
     return row
+
+
+def log_probe(row, retention):
+    reason = row.get("error") or ""
+    if isinstance(result_error := row.get("error"), str) and result_error == "insufficient_memory":
+        reason = server_refusal() or result_error
+    log_attempt(kind="prompt", window=row.get("window"), target_gb=row.get("target_gb"),
+                retention=retention or "default", size=row.get("size"),
+                prompt_tokens=row.get("prompt_tokens"), ok=row.get("ok"),
+                ttft_s=row.get("ttft_s"), prefill_tok_s=row.get("prefill_tok_s"),
+                decode_tok_s=row.get("decode_tok_s"), elapsed_s=row.get("elapsed_s"),
+                reason=reason or ("answered" if row.get("ok") else "no answer"))
 
 
 def record(exerciser, row, result):
@@ -274,11 +298,15 @@ def restart(window, target_gb, retention=None):
     out = ctl("restart", str(window))
     if out.returncode == 0:
         LAST_GOOD["config"] = (window, target_gb, retention)
+        log_attempt(kind="start", window=window, target_gb=target_gb,
+                    retention=retention or "default", ok=True, reason="server started")
         return True
     why = server_refusal() or (out.stderr or out.stdout).strip().splitlines()[-1][:160]
     print(f"    would not start at {target_gb:.1f} GB / {window:,} "
           f"(keeping {retention or 'the default'}): {why}", flush=True)
     RESTART_REASON["why"] = why
+    log_attempt(kind="start", window=window, target_gb=target_gb,
+                retention=retention or "default", ok=False, reason=why)
     return False
 
 
@@ -291,7 +319,7 @@ def critical_pressure():
     return level == "4"
 
 
-def probe(exerciser, window, size, target, rows):
+def probe(exerciser, window, size, target, rows, retention=None):
     """One prompt at this configuration, recorded in the progress file as it goes."""
     progress(window=window, size=size, target_gb=round(target, 1),
              phase="sending a prompt of this size")
@@ -299,6 +327,7 @@ def probe(exerciser, window, size, target, rows):
     row["window"], row["target_gb"] = window, round(target, 1)
     row["critical_pressure"] = critical_pressure()
     rows.append(row)
+    log_probe(row, retention)
     progress(rows=[{"window": r["window"], "size": r["size"], "ok": r["ok"],
                     "ttft_s": r.get("ttft_s"), "error": r.get("error"),
                     "target_gb": r.get("target_gb")} for r in rows],
@@ -372,7 +401,8 @@ def search(args):
                          result="too much for this machine: the server would not start")
             continue
         print(f"  {int(reference_window * 0.5):,} tokens…", end=" ", flush=True)
-        row = probe(exerciser, reference_window, int(reference_window * 0.5) // 1000 * 1000, candidate, rows)
+        row = probe(exerciser, reference_window, int(reference_window * 0.5) // 1000 * 1000, candidate,
+                    rows, retentions[0])
         if row["ok"] and not row["critical_pressure"]:
             target = candidate
             note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
@@ -413,7 +443,7 @@ def search(args):
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
             print(f"  {size:,} tokens…", end=" ", flush=True)
-            row = probe(exerciser, window, size, target, rows)
+            row = probe(exerciser, window, size, target, rows, started_here)
             here.append(row)
             if not row["ok"] and row["error"] == "insufficient_memory":
                 break

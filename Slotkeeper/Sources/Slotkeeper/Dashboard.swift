@@ -32,6 +32,7 @@ struct DashboardView: View {
     @State private var calibrationLog = ""
     @State private var calibrationLogExpanded = true
     @State private var budget: BudgetTables?
+    @State private var attempts: [CalibrationAttempt] = []
     @State private var hours = 24.0
 
     var body: some View {
@@ -50,6 +51,8 @@ struct DashboardView: View {
                     .tabItem { Text("Overview") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { capacityTab }.padding(20) }
                     .tabItem { Text("Capacity") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { attemptsTab }.padding(20) }
+                    .tabItem { Text("Measurements") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
                     .tabItem { Text("Your work") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
@@ -334,6 +337,63 @@ struct DashboardView: View {
             machine: o["machine"] as? String ?? "",
             measured: (o["finished_at"] as? String).flatMap(DashboardView.parseDate),
             limitedBy: o["limited_by"] as? String)
+    }
+
+    /// Every configuration ever tried and what it did, so the next change has evidence.
+    private var attemptsTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ConfigurationTable(rows: configurations)
+            GroupBox("Every attempt, newest first") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Each row is one server start or one prompt. A failure carries the server's own "
+                        + "reason, which is what to act on.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Table(attempts) {
+                        TableColumn("when") { Text($0.ts.formatted(date: .omitted, time: .standard)) }.width(70)
+                        TableColumn("window") { Text($0.windowText) }.width(70)
+                        TableColumn("memory") { Text($0.targetText) }.width(70)
+                        TableColumn("keeping") { Text($0.retention) }.width(70)
+                        TableColumn("prompt") { Text($0.sizeText) }.width(70)
+                        TableColumn("result") { a in
+                            Text(a.ok ? "ok" : "failed").foregroundStyle(a.ok ? .green : .red)
+                        }.width(55)
+                        TableColumn("first token") { Text($0.ttftText) }.width(80)
+                        TableColumn("reading") { Text($0.prefillText) }.width(80)
+                        TableColumn("why") { Text($0.reason).lineLimit(2) }
+                    }
+                    .frame(minHeight: 420)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear(perform: loadAttempts)
+    }
+
+    /// One line per configuration, so a change of setting can be judged at a glance.
+    private var configurations: [ConfigurationSummary] {
+        var grouped: [String: [CalibrationAttempt]] = [:]
+        for a in attempts where a.window > 0 {
+            grouped["\(a.window)|\(a.targetGB)|\(a.retention)", default: []].append(a)
+        }
+        return grouped.values.map(ConfigurationSummary.init).sorted {
+            ($0.window, $0.targetGB) > ($1.window, $1.targetGB)
+        }
+    }
+
+    private func loadAttempts() {
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/calibration-attempts.jsonl")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { attempts = []; return }
+        attempts = text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ts = (o["ts"] as? String).flatMap(DashboardView.parseDate) else { return nil }
+            return CalibrationAttempt(
+                ts: ts, kind: o["kind"] as? String ?? "", window: o["window"] as? Int ?? 0,
+                targetGB: o["target_gb"] as? Double ?? 0, retention: o["retention"] as? String ?? "default",
+                size: o["size"] as? Int, promptTokens: o["prompt_tokens"] as? Int,
+                ok: o["ok"] as? Bool ?? false, ttft: o["ttft_s"] as? Double,
+                prefill: o["prefill_tok_s"] as? Double, decode: o["decode_tok_s"] as? Double,
+                reason: o["reason"] as? String ?? "")
+        }.sorted { $0.ts > $1.ts }
     }
 
     /// Why the numbers are what they are: where the memory goes, what each window would
@@ -854,6 +914,7 @@ struct DashboardView: View {
         loadRequests(iso: date)
         loadJobs()
         loadCalibration()
+        loadAttempts()
     }
 
     @discardableResult
@@ -944,6 +1005,96 @@ struct DashboardView: View {
     static var reportPath: String {
         let ctl = StatusModel.settings["SLOTSTREAM_CTL"] ?? NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper"
         return URL(fileURLWithPath: ctl).deletingLastPathComponent().appendingPathComponent("report.py").path
+    }
+}
+
+/// Kept out of the tab's body: SwiftUI's type checker gives up on long table literals.
+struct ConfigurationTable: View {
+    var rows: [ConfigurationSummary]
+    var body: some View {
+        GroupBox("What each configuration carried") {
+            VStack(alignment: .leading, spacing: 3) {
+                if rows.isEmpty {
+                    Text("no measurements recorded yet").font(.callout).foregroundStyle(.secondary)
+                }
+                ForEach(rows) { row in
+                    HStack(spacing: 10) {
+                        Text(row.title).frame(width: 300, alignment: .leading)
+                        Text(row.verdict).foregroundStyle(row.carried > 0 ? Color.primary : Color.red)
+                            .frame(width: 230, alignment: .leading)
+                        Text(row.speed).foregroundStyle(.secondary)
+                    }.font(.callout)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// One server start or one prompt, from ~/.slotstream/calibration-attempts.jsonl.
+struct CalibrationAttempt: Identifiable {
+    var id: String { "\(ts.timeIntervalSince1970)-\(kind)-\(window)-\(size ?? 0)" }
+    var ts: Date
+    var kind: String
+    var window: Int
+    var targetGB: Double
+    var retention: String
+    var size: Int?
+    var promptTokens: Int?
+    var ok: Bool
+    var ttft: Double?
+    var prefill: Double?
+    var decode: Double?
+    var reason: String
+
+    var windowText: String { window >= 1000 ? "\(window / 1000)K" : "\(window)" }
+    var targetText: String { String(format: "%.1f GB", targetGB) }
+    var sizeText: String {
+        guard let s = promptTokens ?? size else { return kind == "start" ? "–" : "?" }
+        return s >= 1000 ? "\(s / 1000)K" : "\(s)"
+    }
+    var ttftText: String { ttft.map { String(format: "%.0f s", $0) } ?? "–" }
+    var prefillText: String { prefill.map { String(format: "%.0f tok/s", $0) } ?? "–" }
+}
+
+/// What a whole configuration managed, gathered from its attempts.
+struct ConfigurationSummary: Identifiable {
+    var id: String { "\(window)-\(targetGB)-\(retention)" }
+    var window: Int
+    var targetGB: Double
+    var retention: String
+    var carried: Int
+    var ttft: Double?
+    var prefill: Double?
+    var decode: Double?
+    var failure: String?
+
+    init(_ attempts: [CalibrationAttempt]) {
+        let first = attempts[0]
+        window = first.window
+        targetGB = first.targetGB
+        retention = first.retention
+        let answered = attempts.filter { $0.ok && $0.kind == "prompt" }
+        carried = answered.compactMap { $0.promptTokens ?? $0.size }.max() ?? 0
+        let best = answered.max { ($0.promptTokens ?? 0) < ($1.promptTokens ?? 0) }
+        ttft = best?.ttft
+        prefill = best?.prefill
+        decode = best?.decode
+        failure = attempts.first { !$0.ok }?.reason
+    }
+
+    var title: String {
+        "\(window.formatted()) window · " + String(format: "%.1f GB", targetGB) + " · keeping \(retention)"
+    }
+    var verdict: String {
+        carried > 0 ? "carried \(carried.formatted()) tokens" : (failure.map { String($0.prefix(60)) } ?? "nothing ran")
+    }
+    var speed: String {
+        var bits: [String] = []
+        if let t = ttft { bits.append(String(format: "%.0f s to first token", t)) }
+        if let p = prefill { bits.append(String(format: "%.0f tok/s reading", p)) }
+        if let d = decode { bits.append(String(format: "%.1f tok/s generating", d)) }
+        if carried > 0, let f = failure { bits.append("then: " + String(f.prefix(40))) }
+        return bits.joined(separator: " · ")
     }
 }
 
