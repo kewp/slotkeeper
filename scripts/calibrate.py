@@ -500,6 +500,9 @@ def run(args):
         print("stopped; restoring a working configuration", flush=True)
         return 130
     finally:
+        # An interrupted search must not leave the app claiming it is still measuring:
+        # clear_progress() otherwise only runs when a run settles.
+        clear_progress()
         good = LAST_GOOD.get("config")
         if good and LAST_GOOD.get("dirty"):
             print(f"restoring the last working configuration: {good[0]:,} at "

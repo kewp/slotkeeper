@@ -110,7 +110,7 @@ sitting there the whole time.
 
 | File | What it is | Use it for |
 | --- | --- | --- |
-| `~/.slotstream/slotstream.log` | The server's own running commentary. Per-pass prefill progress (`prefill: 75520/100369 tokens (75%), ~8.6 min left`), the memory plan at startup, elastic pool moves, every refusal in full. Rotated at 10 MB. | **Anything happening right now.** `tail -f` it during any long request. It is the only place live prefill progress exists. |
+| `~/.slotstream/slotstream.log` | The server's own running commentary. Per-pass prefill progress (`prefill: 75520/100369 tokens (75%), ~8.6 min left`), the memory plan at startup, elastic pool moves, every refusal in full. Rotated at 10 MB. | **Anything happening right now.** `tail -f` it during any long request. The app parses these lines only for requests it can attribute (OpenCode or exerciser), so for a calibration probe or a direct API call the log is the only place progress appears. |
 | `~/.slotstream/metrics/<date>.jsonl` | 30-second samples from `monitor.sh`: pressure, free %, swap, disk, battery, and per-server `experts_per_layer`, `pool_gb`, `size_vram_gb`, `rss_mb`, `cpu_percent`, `prefix_hits/misses/evictions/held`. ~1 MB/day. | **Testing any claim about memory.** It is the richest source in the system and answers "did the pool actually shrink?" directly. |
 | `~/.slotstream/metrics/exerciser.jsonl` | Every background task the exerciser ran, with timings and failures. | Trends over days; what breaks unattended. |
 | `~/.slotstream/metrics/opencode.jsonl` | Karl's real OpenCode requests, including real errors. | Ground truth about actual use, as opposed to anything we synthesise. |

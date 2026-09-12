@@ -227,11 +227,11 @@ one only if long prompts fail with `insufficient_memory`.
   report. The structured log record stays.
 - The OpenAI-compatible stream does not carry prefill progress, so the
   plugin's live count and ETA are estimates. Exact progress is in the server
-  log and nowhere else: `tail -f ~/.slotstream/slotstream.log` shows
+  log: `tail -f ~/.slotstream/slotstream.log` shows
   `prefill: 75520/100369 tokens (75%), ~8.6 min left` every few thousand
-  tokens. The app shows that log as raw text on its Server tab but does not
-  parse it into the live request view, so a long prefill looks stalled there
-  when it is progressing.
+  tokens. The app parses those lines, but only for a request it can attribute —
+  an OpenCode request or an exerciser task. A calibration probe or a direct API
+  call has no marker, so the app shows nothing while the log shows progress.
 - Ollama also defaults to port 11434. The setup default of 11435 avoids that.
 - OpenCode names each session by asking the model for a title, which costs a
   request on the local server. Turn it off with

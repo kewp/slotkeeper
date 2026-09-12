@@ -331,6 +331,14 @@ final class StatusModel: ObservableObject {
             }
             return req
         }
+        // Nobody claimed this one -- a calibration probe, a direct API call, anything
+        // that writes no marker. The server log still knows, and a 47-minute prefill
+        // showing nothing here is how we spent 2026-09-12 guessing at an ETA.
+        if let p = prefillProgress(since: nil) {
+            var req = ActiveRequest(source: "request in flight (no marker: calibration or direct API)")
+            req.lines.append(p)
+            return req
+        }
         return nil
     }
 

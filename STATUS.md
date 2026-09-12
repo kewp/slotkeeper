@@ -59,12 +59,14 @@ which is exactly what calibration reports per machine.
    written — the row is in `calibration-attempts.jsonl`.
 5. **The five patches are not upstreamed.** Pull-request text is written in
    `patches/README.md`.
-6. **The app does not show live prefill progress**, though the server has written
-   it all along. `slotstream.log` carries `prefill: 75520/100369 tokens (75%),
-   ~8.6 min left` every few thousand tokens; the app tails that file as raw text
-   on the Server tab and never parses it, so a 39-minute prefill looks stalled.
-   README and `APP_IMPLEMENTATION.md` both claimed this was built until
-   2026-09-12; it never was. Parsing one line is the whole fix.
+6. **The app hides live prefill progress for unattributed requests.** It parses the
+   server's `prefill: 75520/100369 tokens (75%)` lines correctly, but only after
+   `readActiveRequest` has identified the request from the `opencode-active` marker or
+   the exerciser state. A calibration probe and a direct API call have neither, so a
+   47-minute prefill shows nothing while the log shows everything. The fix is to fall
+   back to the log itself when no owner is known. Separately, an interrupted search used
+   to leave `calibration.progress.json` behind, so the app claimed to be measuring long
+   after the search stopped; fixed 2026-09-12.
 7. **The search has not yet completed a full run.** Calibration now searches memory
    target and window, including above 65,536, and `setup.sh` installs it on a fresh
    machine; one clean end-to-end run on this Mac is what proves it.
