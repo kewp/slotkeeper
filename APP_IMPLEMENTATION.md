@@ -212,6 +212,13 @@ and B. Never import MLX or Slotstream into the app.
 
 ### A1. Requests table (est. 1 day)
 
+Done 2026-09-12: `DashboardView.yourRequests` shows counts, a TTFT-by-prompt
+chart coloured by cold versus follow-up, the follow-up/cold median comparison,
+and a table of the last 80 requests. It shells out to
+`scripts/report.py --requests --json --hours N` (resolved next to
+`SLOTSTREAM_CTL`) and never opens the database itself. Remaining in A1: filters,
+click-through to a single request, and joining the plugin's exact TTFT.
+
 Source correction (2026-09-12): read OpenCode's own database, not the plugin's
 log, which OpenCode never writes. `scripts/report.py` has the working query and
 the field map is in 1.10; the plugin's `metrics/opencode.jsonl` joins on message

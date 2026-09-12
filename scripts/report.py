@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Summarize what the exerciser, benchmark and monitor have recorded.
 
-Usage: report.py [--hours N] [--json]     (default: last 24 hours)
+Usage: report.py [--hours N] [--json] [--requests]     (default: last 24 hours)
+
+--requests prints one JSON object per OpenCode request instead of the summary, which is
+what the menu-bar app's requests table reads (it never opens the database itself).
 
 Your own OpenCode sessions come first: every assistant message sent to the local
 provider, read from OpenCode's database (~/.local/share/opencode/opencode.db, read-only)
@@ -213,8 +216,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--requests", action="store_true",
+                    help="print per-request rows for your OpenCode sessions as JSON")
     a = ap.parse_args()
     since = datetime.now(timezone.utc) - timedelta(hours=a.hours)
+
+    if a.requests:
+        rows = []
+        for r in opencode_requests(since):
+            row = dict(r)
+            row["ts"] = datetime.fromtimestamp(r["ts"] / 1000, timezone.utc).isoformat(timespec="seconds") if r["ts"] else None
+            rows.append(row)
+        print(json.dumps(rows, indent=2 if not a.json else None))
+        return
 
     ex = [r for r in rows(os.path.join(M, "exerciser.jsonl")) if (ts(r) or since) >= since]
     bench = [r for r in rows(os.path.join(M, "bench.jsonl")) if (ts(r) or since) >= since]

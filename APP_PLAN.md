@@ -23,7 +23,8 @@ stage useful on its own.
 ### Stage A: Observe (1 to 2 weeks)
 
 - Dashboard as the main window with tabs: Overview, Requests, Exerciser,
-  Experiments, Server, Health.
+  Experiments, Server, Health. (2026-09-12: the dashboard's first section is
+  now "Your OpenCode requests", read through `scripts/report.py --requests`.)
 - Requests tab: every request from any client in one table, from the plugin's
   structured log (`~/.local/share/opencode/log`, service `model-stats`) and the
   exerciser rows. Columns: source, agent, prompt/cached/output tokens, TTFT,
