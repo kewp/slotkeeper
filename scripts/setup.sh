@@ -105,6 +105,9 @@ if [[ $SERVICES == 1 ]]; then
   "$CTL" monitor start 2>&1 | tail -1
   "$CTL" exerciser start 2>&1 | tail -1
   if command -v swift >/dev/null; then "$CTL" bar install 2>&1 | tail -1; fi
+  # The point of the whole setup is knowing what this machine can do, so measure it.
+  # It waits until nobody is using the machine, which is what makes it safe to install now.
+  "$CTL" calibrate auto start 2>&1 | tail -1
   echo
   "$CTL" status
 else
@@ -115,8 +118,15 @@ cat <<EOF
 
 Done. Everyday commands:
   $CTL status                  server, plan, cache, pressure
-  $CTL restart deep            switch to the 65K profile (and back with 'restart everyday')
-  $CTL exerciser status        background test suite; pause/resume from the menu bar
-  $REPO/scripts/report.py      what has been measured
-See README.md for the rest.
+  $CTL calibrate               measure what this machine handles (restarts the server; ~30 min)
+  $CTL calibrate --show        the last verdict, without measuring
+  $CTL capacity                what a window costs in memory, from the planner's ledger
+  $CTL jobs add <repo> "task"  queue an unattended task; 'jobs daemon start' runs them overnight
+  $REPO/scripts/report.py      your own OpenCode sessions first, then the synthetic suite
+  $REPO/scripts/selftest.sh    check this checkout without loading the model
+
+Calibration runs on its own when you are away and writes the verdict to
+~/.slotstream/calibration.json; the app shows it at the top. To get the answer now
+instead of waiting, run '$CTL calibrate' while you are not using the machine.
+See README.md and STATUS.md for the rest.
 EOF
