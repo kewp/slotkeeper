@@ -40,6 +40,8 @@ patch_status() {
   if grep -q "prefix retention ceiling must be between" <<<"$dump"; then echo "  prefix retention patch: present"; else echo "  prefix retention patch: absent"; fi
   if grep -q "capped below the pool that met pressure" <<<"$dump"; then echo "  pressure ceiling patch: present"; else echo "  pressure ceiling patch: absent"; fi
   if grep -q "committed prompt tokens for a retry" <<<"$dump"; then echo "  resume-after-refusal patch: present"; else echo "  resume-after-refusal patch: absent"; fi
+  if grep -q "beyond-qualified-context" <<<"$dump"; then echo "  window-beyond-qualified patch: present"; else echo "  window-beyond-qualified patch: absent"; fi
+  if grep -q "SLOTSTREAM_AVAILABILITY_SLACK_GB" <<<"$dump"; then echo "  settable-headroom patch: present"; else echo "  settable-headroom patch: absent"; fi
 }
 if (( STATUS )); then patch_status; exit 0; fi
 
