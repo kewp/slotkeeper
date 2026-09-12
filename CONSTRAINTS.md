@@ -9,7 +9,9 @@ cannot" until it has been traced to an entry here.** Each entry is one of three 
   different hardware or a different model. These are the only acceptable "cannot"s.
 
 If a new failure does not map to a row below, the row is missing: add it, then decide
-which of the three it is. "That is how Slotstream does it" is not one of the three.
+which of the three it is. "That is how Slotstream does it" is not one of the three, and
+neither is quoting the server's error text: Slotstream is source we compile, every refusal
+is a constant someone chose, and this project has already changed seven of them.
 
 ## Searched
 
@@ -22,6 +24,7 @@ which of the three it is. "That is how Slotstream does it" is not one of the thr
 | Prefill-wait budget | `slotkeeper` `prefill_wait_for` | Scales with the window: twice the estimated full-window prefill. A fixed ten minutes silently capped prompts at about 24K. |
 | Expert cache size | the planner, from the target | Follows the memory target; the governor resizes it live. |
 | Longest test prompt | `EXERCISER_MAX_PROMPT`, `--sweep auto` | Derived from the server's window, not a constant. |
+| Safety headroom | `SLOTSTREAM_AVAILABILITY_SLACK_GB` → `Planner.availabilitySlackGB` | Default 5% of RAM, at least 1.5 GB, which was a policy nobody had measured. Patch seven makes it settable; the ladder trades it last, in steps to 0.75 GB and 0.25 GB, and only after retention and pass size. |
 
 ## Patched
 
@@ -48,8 +51,9 @@ which of the three it is. "That is how Slotstream does it" is not one of the thr
 
 | Limit | Status |
 | --- | --- |
+| A configuration that will not start | `slotkeeper start` now falls back to defaults, keeps the failing settings in `ctl.env.unloadable`, and says so. An interrupted search must never leave the machine without a server. |
 | Minimum expert pool (`Geometry.floorSlots`, 640 slots, 1.77 GB) | A floor tied to the prefill chunk: below it one pass can pin every slot. With a 256-token chunk it could be lower, which would free memory for the window. Candidate for patch eight; not yet measured. |
 | Per-pass admission refusal | A long prompt is refused when one pass does not fit, rather than the pass being made smaller. Patch seven: fall back to a smaller chunk in place, instead of failing the request. |
-| Availability slack (`max(1.5 GB, 5% of RAM)`) and the 1 GB planning margin | Real guards against the machine becoming unusable. Worth measuring whether they can be smaller on a large machine; not a capability cap today. |
+| The 1 GB planning margin | A guard against the machine becoming unusable, not yet settable. Measure whether it can be smaller before making it another rung. |
 | Metal working set (`device_working_set_gb`, about 75% of RAM) | The planner bounds a plan's peak by it. macOS reports it as a recommendation, not a hard wall, so a target above it is worth measuring rather than assuming; the search now tries targets above it and records what the server says. |
 | What else is running | A target that fails while a browser holds memory can succeed on a quiet machine: 17.3 GB was refused at 10:47 and started at 11:06. The verdict records the machine's state, and calibration prefers to run when you are away. |

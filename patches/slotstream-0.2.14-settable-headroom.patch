@@ -1,0 +1,81 @@
+diff -ruN a/Sources/Slotstream/Plan.swift b/Sources/Slotstream/Plan.swift
+--- a/Sources/Slotstream/Plan.swift	2026-09-11 18:52:39
++++ b/Sources/Slotstream/Plan.swift	2026-09-12 11:14:37
+@@ -582,8 +582,21 @@
+ 
+     /// Headroom kept between our expected peak and what is reclaimable, so
+     /// claiming it doesn't leave the machine at zero.
++    ///
++    /// The default is a policy, not a measurement: 5% of RAM, at least 1.5 GB. On a
++    /// machine that is otherwise idle that headroom is the difference between a window
++    /// that loads and one that is refused, so it is settable, and something measuring
++    /// what a machine can hold is expected to vary it and watch whether the machine
++    /// stays responsive. `SLOTSTREAM_AVAILABILITY_SLACK_GB=0.75` halves it; 0 removes
++    /// it entirely, which is only sensible while nothing else needs the machine.
++    public nonisolated(unsafe) static var availabilitySlackOverrideGB: Double? =
++        ProcessInfo.processInfo.environment["SLOTSTREAM_AVAILABILITY_SLACK_GB"]
++            .flatMap(Double.init)
++            .flatMap { $0 >= 0 && $0.isFinite ? $0 : nil }
++
+     public static func availabilitySlackGB(ramGB: Double) -> Double {
+-        max(1.5, 0.05 * ramGB)
++        if let override = availabilitySlackOverrideGB { return override }
++        return max(1.5, 0.05 * ramGB)
+     }
+ 
+     /// The share of RAM auto may target before other limits apply. Overridable
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-12 10:42:50
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-12 11:16:42
+@@ -2,6 +2,40 @@
+ import Slotstream
+ 
+ extension Diagnostics {
++    /// The safety headroom is a policy we can set, so a measurement can vary it.
++    public static func availabilitySlack() -> CheckReport {
++        var c = CheckBuilder("availability-slack")
++        let saved = Planner.availabilitySlackOverrideGB
++        defer { Planner.availabilitySlackOverrideGB = saved }
++        Planner.availabilitySlackOverrideGB = nil
++        c.equal("the default is 5% of RAM", Planner.availabilitySlackGB(ramGB: 64), 3.2)
++        c.equal("with a floor of 1.5 GB", Planner.availabilitySlackGB(ramGB: 16), 1.5)
++        Planner.availabilitySlackOverrideGB = 0.75
++        c.equal("an override replaces it", Planner.availabilitySlackGB(ramGB: 64), 0.75)
++        Planner.availabilitySlackOverrideGB = 0
++        c.equal("zero is allowed, for a machine with nothing else on it",
++                Planner.availabilitySlackGB(ramGB: 64), 0)
++        // Less headroom must mean more fits, which is the whole point of setting it.
++        func fits(_ available: Double, slack: Double?) -> Bool {
++            Planner.availabilitySlackOverrideGB = slack
++            return (try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 16,
++                ramGB: 26, workingSetGB: 19, availableGB: available, vision: .off,
++                maxContextTokens: 65_536, simulated: true, qualification: true)) != nil
++        }
++        var flipped = false
++        for tenths in stride(from: 120, through: 200, by: 1) {          // 12.0 GB to 20.0 GB free
++            let available = Double(tenths) / 10
++            if !fits(available, slack: nil), fits(available, slack: 0.25) { flipped = true; break }
++        }
++        c.expect("somewhere the default headroom refuses what less headroom admits", flipped)
++        for tenths in stride(from: 120, through: 200, by: 5) {
++            let available = Double(tenths) / 10
++            c.expect("less headroom never admits less, at \(available) GB free",
++                     !fits(available, slack: nil) || fits(available, slack: 0.25))
++        }
++        return c.report()
++    }
++
+     /// Windows above the qualified envelope are a memory question, not a forbidden one.
+     public static func beyondQualifiedContext() -> CheckReport {
+         var c = CheckBuilder("beyond-qualified-context")
+diff -ruN a/Sources/SlotstreamTestKit/T0Checks.swift b/Sources/SlotstreamTestKit/T0Checks.swift
+--- a/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-12 10:41:25
++++ b/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-12 11:14:37
+@@ -22,6 +22,7 @@
+             Check("runtime-check", tier: .t0) { try Diagnostics.runtime() },
+             Check("prefix-client-capacity", tier: .t0) { try Diagnostics.optimizationPrefixCapacity() },
+             Check("beyond-qualified-context", tier: .t0) { Diagnostics.beyondQualifiedContext() },
++            Check("availability-slack", tier: .t0) { Diagnostics.availabilitySlack() },
+             Check("governor-check", tier: .t0) { Diagnostics.governorPolicy() },
+             Check("request-pressure-policy", tier: .t0) { Diagnostics.requestPressurePolicy() },
+             Check("pull-check", tier: .t0) { try Diagnostics.pullIntegrity() },

@@ -2,6 +2,40 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Read this first, every session
+
+**The server is ours. Slotstream is source we compile and patch, not a service we call.**
+
+Karl has said this repeatedly, and each time it was because an assistant treated a
+Slotstream refusal as the end of the conversation:
+
+- "we could patch slotstream. but i don't want to have to keep saying 'hey, why don't we
+  just fix that'"
+- "please stop saying 'oh slotstream has a limit' or 'this is slotstream's limit'. we can
+  modify slotstream! we've been doing it this whole project!"
+- "'the server's own reason' is not an excuse"
+- "it seems like i'm constantly being told 'hey we can't do this because of some thing we
+  chose to do ages ago'"
+
+So: **quoting the server's error message is a description of a symptom, never an
+explanation and never a reason to stop.** Every refusal comes from a line of Swift in
+`~/.slotstream/build/*/Sources`, and that line has an author, a rationale and a number in
+it. Find it. Then say which it is: a policy we can set (make it settable and search it), a
+guard whose value is a guess (measure it), or arithmetic from the hardware (the only real
+"no"). There are seven patches in `patches/` because six of those refusals were the first
+two kinds.
+
+Why this keeps going wrong, so the next assistant can catch it earlier: a server that
+answers with a well-written error message *sounds* authoritative, and repeating it feels
+like diligence. It is not. In this project the well-written message has been wrong about
+what the machine can do every single time — the 65,536 window, the retention reservation,
+the prefill-wait budget, the safety headroom. Treat a confident refusal as the start of the
+investigation.
+
+The check before you write a sentence containing "cannot", "limit", "refuses" or "the
+server says": have you opened the Swift source and named the constant? If not, you are
+guessing, and the guess has been wrong every time so far.
+
 ## The goal, which overrides everything below
 
 **Automatically work out what this model can do on the Mac it is running on, and say

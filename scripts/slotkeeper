@@ -65,6 +65,7 @@ SLOTSTREAM_MODEL="${SLOTSTREAM_MODEL:-qwen3.8-flash-next:4bit}"
 SLOTSTREAM_MAX_PREFILL_WAIT_DEFAULT="${SLOTSTREAM_MAX_PREFILL_WAIT:-10}"
 SLOTSTREAM_CAFFEINATE="${SLOTSTREAM_CAFFEINATE:-1}"
 SLOTSTREAM_VISION="${SLOTSTREAM_VISION:-off}"
+DEFAULT_PROFILE_TOKENS=32768
 OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 LOG="$SLOTSTREAM_HOME/slotstream.log"
 PROFILE_FILE="$SLOTSTREAM_HOME/profile"
@@ -219,6 +220,23 @@ cmd_run() {
   exec "$SLOTSTREAM_BIN" "${SERVE_ARGS[@]}"
 }
 
+# A configuration that will not start must never leave the machine without a server.
+# Calibration writes experimental settings here; if one of them is unloadable (or a run
+# was interrupted mid-search), fall back to settings we know work and say so loudly.
+start_fallback() {
+  local context="$1"
+  log "warning: the server would not start at ${context} tokens with the current settings; falling back"
+  local env_file="$SLOTSTREAM_HOME/ctl.env"
+  if [[ -f "$env_file" ]]; then
+    cp "$env_file" "$env_file.unloadable"
+    sed -i '' '/^SLOTSTREAM_MEMORY_GB=/d; /^SLOTSTREAM_PREFILL_CHUNK=/d; /^SLOTSTREAM_AVAILABILITY_SLACK_GB=/d; /^SLOTSTREAM_PREFIX_CACHE_TOKENS=/d' "$env_file"
+    unset SLOTSTREAM_MEMORY_GB SLOTSTREAM_PREFILL_CHUNK SLOTSTREAM_AVAILABILITY_SLACK_GB SLOTSTREAM_PREFIX_CACHE_TOKENS
+    log "kept the settings that failed in $env_file.unloadable"
+  fi
+  echo "$DEFAULT_PROFILE_TOKENS" > "$PROFILE_FILE"
+  log "falling back to $DEFAULT_PROFILE_TOKENS tokens with default memory settings"
+}
+
 cmd_start() {
   local context; context="$(resolve_profile "${1:-}")"
   if [[ -f "$AGENT_PLIST" ]]; then
@@ -227,7 +245,15 @@ cmd_start() {
     check_port; check_disk; rotate_log
     warn_profile_mismatch "$context"
     launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
+    launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
+    if ! wait_ready 210; then
+      start_fallback "$context"
+      context="$(resolve_profile "")"
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST" 2>/dev/null || true
+      wait_ready 210 || die "the server will not start even with default settings; see $LOG"
+    fi
+    return 0
   else
     [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
     check_port; check_disk; rotate_log
@@ -261,6 +287,18 @@ cmd_stop() {
   log "still running after 30s, sending SIGKILL"
   kill -KILL $(server_pids) 2>/dev/null || true
   rm -f "$PID_FILE"
+}
+
+# Non-fatal readiness: returns 1 instead of dying, so a caller can fall back.
+wait_ready() {
+  local timeout="${1:-180}" i
+  for i in $(seq 1 "$timeout"); do
+    healthy && { log "ready on $BASE"; return 0; }
+    (( i > 10 )) && [[ -z "$(server_pids)" ]] && { log "warning: process exited before becoming ready; see $LOG"; return 1; }
+    sleep 1
+  done
+  log "warning: not ready after ${timeout}s"
+  return 1
 }
 
 cmd_wait_ready() {

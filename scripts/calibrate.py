@@ -288,16 +288,22 @@ def server_refusal():
 # What we give up, in order, to make a window work. Least sacrifice first: the window is
 # what the user gets, so retention and pass size go before it does. See CONSTRAINTS.md.
 LADDER = [
-    {"retention": "full", "chunk": None, "gives_up": "nothing"},
-    {"retention": "32768", "chunk": None, "gives_up": "keeping only 32,768 tokens of conversation"},
-    {"retention": None, "chunk": None, "gives_up": "the server's own small retention"},
-    {"retention": "32768", "chunk": "512", "gives_up": "a 512-token prefill pass"},
-    {"retention": None, "chunk": "512", "gives_up": "a 512-token pass and little retention"},
-    {"retention": None, "chunk": "256", "gives_up": "a 256-token pass, the smallest we run"},
+    {"retention": "full", "chunk": None, "slack": None, "gives_up": "nothing"},
+    {"retention": "32768", "chunk": None, "slack": None, "gives_up": "keeping only 32,768 tokens of conversation"},
+    {"retention": None, "chunk": None, "slack": None, "gives_up": "the server's own small retention"},
+    {"retention": "32768", "chunk": "512", "slack": None, "gives_up": "a 512-token prefill pass"},
+    {"retention": None, "chunk": "512", "slack": None, "gives_up": "a 512-token pass and little retention"},
+    {"retention": None, "chunk": "256", "slack": None, "gives_up": "a 256-token pass, the smallest we run"},
+    # The safety headroom is a policy, not a measurement: 5% of RAM by default. On a
+    # machine with nothing else running it is the difference between a window that loads
+    # and one that is refused, so it is the last thing we trade, and only in steps.
+    {"retention": "full", "chunk": None, "slack": "0.75", "gives_up": "most of the safety headroom"},
+    {"retention": "32768", "chunk": "512", "slack": "0.75", "gives_up": "most of the headroom and the pass size"},
+    {"retention": None, "chunk": "256", "slack": "0.25", "gives_up": "nearly all the headroom, with the smallest pass"},
 ]
 
 
-def restart(window, target_gb, retention=None, chunk=None):
+def restart(window, target_gb, retention=None, chunk=None, slack=None):
     """Bring the server up at one configuration. False when it will not start there.
 
     `retention` is how much conversation the server may keep: "full", a token count,
@@ -307,6 +313,7 @@ def restart(window, target_gb, retention=None, chunk=None):
     set_env("SLOTSTREAM_MEMORY_GB", f"{target_gb:.1f}" if target_gb else None)
     set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention)
     set_env("SLOTSTREAM_PREFILL_CHUNK", chunk)
+    set_env("SLOTSTREAM_AVAILABILITY_SLACK_GB", slack)
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
@@ -413,7 +420,7 @@ def search(args):
         print(f"\n=== trying a {candidate:.1f} GB memory target", flush=True)
         progress(phase=f"trying a {candidate:.1f} GB memory target", target_gb=candidate,
                  window=reference_window, size=None)
-        if not restart(reference_window, candidate, retentions[0]):
+        if not restart(reference_window, candidate, retentions[0], None, None):
             notes.append(f"{candidate:.1f} GB: server would not start")
             note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
                          result="too much for this machine: the server would not start")
@@ -448,7 +455,7 @@ def search(args):
         # when there is nothing left to give up.
         rung = None
         for candidate in LADDER:
-            if restart(window, target, candidate["retention"], candidate["chunk"]):
+            if restart(window, target, candidate["retention"], candidate["chunk"], candidate.get("slack")):
                 rung = candidate
                 break
             note_attempt(kind="window", window=window, target_gb=target,
@@ -472,7 +479,7 @@ def search(args):
                 for candidate in LADDER[LADDER.index(rung) + 1:]:
                     print(f"  giving up {candidate['gives_up']} and retrying {size:,}…",
                           end=" ", flush=True)
-                    if not restart(window, target, candidate["retention"], candidate["chunk"]):
+                    if not restart(window, target, candidate["retention"], candidate["chunk"], candidate.get("slack")):
                         continue
                     rung, started_here = candidate, candidate["retention"]
                     row = probe(exerciser, window, size, target, rows, started_here)
@@ -505,7 +512,8 @@ def search(args):
 
     # 3. Settle there and keep it: the window in the profile, the target in ctl.env.
     print(f"\n=== settling on {chosen_window:,} at {target:.1f} GB", flush=True)
-    restart(chosen_window, target, chosen_retention)
+    restart(chosen_window, target, chosen_retention, os.environ.get("SLOTSTREAM_PREFILL_CHUNK"),
+            os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB"))
     ctl("profile", str(chosen_window))
     # The measured target supersedes any share we picked by hand earlier.
     set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
@@ -523,6 +531,7 @@ def search(args):
         "memory_target_gb": target,
         "retention": chosen_retention or "the server's default",
         "prefill_chunk": os.environ.get("SLOTSTREAM_PREFILL_CHUNK", "default"),
+        "availability_slack_gb": os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB", "default"),
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
