@@ -27,6 +27,9 @@
 #   jobs <add|list|show|cancel|run|report>  Unattended coding tasks for the local model (scripts/jobs.py).
 #   jobs daemon <start|stop|status>         Run queued jobs overnight as a LaunchAgent.
 #   jobs <pause [reason]|resume>            Hold the runner without unloading it.
+#   calibrate [--quick|--show|--window N]   Measure what this machine handles and write the verdict
+#                       to ~/.slotstream/calibration.json (restarts the server; not while you work).
+#   capacity [--window N|--ram N]           What a window costs in memory, from the planner's ledger.
 #   exerciser <start|stop|pause [reason]|resume|status|report>
 #                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
@@ -469,6 +472,18 @@ case "${1:-}" in
   bar) cmd_bar "${2:-status}" ;;
   monitor) cmd_monitor "${2:-status}" ;;
   jobs) cmd_jobs "${@:2}" ;;
+  calibrate)
+    case "${2:-}" in
+      auto)
+        case "${3:-status}" in
+          start) install_side_agent "local.slotkeeper-calibrate" "$SCRIPT_DIR/calibrate.py" "$SLOTSTREAM_HOME/calibrate-auto.log" --auto --quick ;;
+          stop) remove_side_agent "local.slotkeeper-calibrate" ;;
+          status) echo "auto calibration: $(agent_installed "local.slotkeeper-calibrate" && echo "installed" || echo "not installed")$([[ -f "$SLOTSTREAM_HOME/calibrate.pause" ]] && echo "  PAUSED: $(cat "$SLOTSTREAM_HOME/calibrate.pause")")" ;;
+          *) die "calibrate auto start|stop|status" ;;
+        esac ;;
+      *) exec "$SCRIPT_DIR/calibrate.py" "${@:2}" ;;
+    esac ;;
+  capacity) exec "$SCRIPT_DIR/window-budget.py" "${@:2}" ;;
   exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
   -h|--help|help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

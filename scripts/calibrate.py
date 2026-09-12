@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Measure what this machine can actually handle, and write down the answer.
+
+Runs real requests at increasing prompt sizes, steps the context window down when a
+size fails for memory, and stops when a window carries prompts up to three quarters of
+itself. The result goes to ~/.slotstream/calibration.json and is what the app shows:
+
+    "up to 24,000-token prompts at a 32,768 window, about 60 s to the first token"
+
+It restarts the server to change the window, so it is something you run once on a new
+machine (or after changing memory settings), not while you are working. It refuses to
+start while your own OpenCode session is active.
+
+Usage:
+  calibrate.py                 full run: pick a window, find the largest prompt it carries
+  calibrate.py --quick         three sizes per window instead of four
+  calibrate.py --window 32768  test one window only
+  calibrate.py --show          print the last calibration without measuring
+  calibrate.py --auto          keep the answer current on its own: waits until you are away,
+                               measures when there is no valid calibration, then rechecks hourly
+                               (stop it with ~/.slotstream/calibrate.pause, or from the app)
+"""
+import argparse, importlib.util, json, os, subprocess, sys, time
+from datetime import datetime, timezone
+
+HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
+_env = os.path.join(HOME, "ctl.env")
+if os.path.exists(_env):
+    for _line in open(_env):
+        if "=" in _line and not _line.startswith("#"):
+            _k, _v = _line.rstrip("\n").split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULT = os.path.join(HOME, "calibration.json")
+CTL = os.path.join(REPO, "scripts", "slotkeeper")
+ACTIVE = os.path.join(HOME, "opencode-active")
+PAUSE = os.path.join(HOME, "calibrate.pause")
+JOBS = os.path.join(HOME, "jobs", "running")
+STALE_DAYS = 30
+IDLE_MINUTES = 30       # how long you must be away before it takes the server
+NIGHT_HOURS = (0, 7)
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "scripts", f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ctl(*args, timeout=600):
+    return subprocess.run(["bash", CTL] + list(args), capture_output=True, text=True, timeout=timeout)
+
+
+def busy():
+    if os.path.exists(ACTIVE) and time.time() - os.path.getmtime(ACTIVE) < 600:
+        return "your OpenCode session is active; calibration restarts the server"
+    return None
+
+
+def idle_minutes():
+    """Minutes since the last keyboard or mouse input."""
+    try:
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem", "-d", "4"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if '"HIDIdleTime"' in line:
+            try:
+                return int(line.rsplit("=", 1)[1].strip()) / 1e9 / 60
+            except ValueError:
+                return None
+    return None
+
+
+def blocked_for_auto():
+    """Why the automatic run should not take the server right now, or None.
+
+    Calibration restarts the server and loads it for several minutes, so it only runs
+    when you are demonstrably not there: at night, or after half an hour away."""
+    if os.path.exists(PAUSE):
+        return (open(PAUSE).read().strip() or "automatic calibration is stopped")
+    if (why := busy()):
+        return why
+    if os.path.isdir(JOBS) and any(f.endswith(".json") for f in os.listdir(JOBS)):
+        return "a job is running"
+    mine = str(os.getpid())
+    others = [pid for pid in subprocess.run(["pgrep", "-f", "calibrate.py"], capture_output=True,
+                                            text=True).stdout.split() if pid != mine]
+    if others:
+        return "a calibration is already running"
+    if "discharging" in subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout:
+        return "on battery"
+    hour = datetime.now().hour
+    if NIGHT_HOURS[0] <= hour < NIGHT_HOURS[1]:
+        return None
+    idle = idle_minutes()
+    if idle is None or idle < IDLE_MINUTES:
+        return f"you are using the machine" + (f" ({idle:.0f} min idle)" if idle is not None else "")
+    return None
+
+
+def current(result=None):
+    """Whether the stored calibration still describes this setup."""
+    if result is None:
+        if not os.path.exists(RESULT):
+            return False, "never measured"
+        try:
+            with open(RESULT) as f:
+                result = json.load(f)
+        except ValueError:
+            return False, "unreadable"
+    if result.get("machine") != _machine_description():
+        return False, "different machine"
+    if result.get("ram_percent") != os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70"):
+        return False, "memory settings changed"
+    binary = os.path.join(HOME, "bin", "slotstream")
+    if os.path.exists(binary) and result.get("finished_at"):
+        built = datetime.fromtimestamp(os.path.getmtime(binary), timezone.utc)
+        if built > datetime.fromisoformat(result["finished_at"]):
+            return False, "the server was rebuilt since"
+    age = datetime.now(timezone.utc) - datetime.fromisoformat(result["finished_at"])
+    if age.days > STALE_DAYS:
+        return False, f"measured {age.days} days ago"
+    return True, "current"
+
+
+def auto(args):
+    """Keep the answer current without being asked, and stay out of the way."""
+    print(f"auto calibration: checking hourly; stop with {PAUSE}", flush=True)
+    while True:
+        ok, why = current()
+        if ok:
+            time.sleep(3600)
+            continue
+        hold = blocked_for_auto()
+        if hold:
+            print(f"waiting ({why}): {hold}", flush=True)
+            time.sleep(600)
+            continue
+        print(f"calibrating: {why}", flush=True)
+        try:
+            run(args)
+        except Exception as e:                      # a calibration must never take the machine down
+            print(f"calibration failed: {e}", file=sys.stderr, flush=True)
+            time.sleep(3600)
+
+
+def measure(exerciser, size, label):
+    """One real request at about `size` prompt tokens. Returns a row, never raises."""
+    prompt, est, files = exerciser.build_codebase_prompt(size)
+    if not files:
+        return {"size": size, "ok": False, "note": "no source files to build a prompt from"}
+    t0 = time.monotonic()
+    result = exerciser.chat(
+        [{"role": "user", "content": f"Summarise in two sentences what these files do.\n\n{prompt}"}],
+        max_tokens=64)
+    row = {"size": size, "label": label, "requested_tokens": est,
+           "prompt_tokens": result.get("prompt_tokens"), "ttft_s": result.get("ttft_s"),
+           "prefill_tok_s": result.get("prefill_tok_s"), "decode_tok_s": result.get("decode_tok_s"),
+           "elapsed_s": round(time.monotonic() - t0, 1),
+           "error": (result.get("error") or {}).get("code") if isinstance(result.get("error"), dict) else result.get("error")}
+    row["ok"] = not row["error"] and bool(result.get("text", "").strip())
+    return row
+
+
+def run(args):
+    exerciser = load("exerciser")
+    windows = [args.window] if args.window else None
+    if windows is None:
+        ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
+        ceiling = _ceiling(ram, working_set, args.percent)
+        windows = [w for w in (65_536, 49_152, 32_768, 16_384) if w <= ceiling] or [16_384]
+    fractions = (0.25, 0.5, 0.75) if args.quick else (0.25, 0.5, 0.75, 0.9)
+
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    attempts = []
+    chosen = None
+    for window in windows:
+        print(f"\n=== window {window:,}: restarting the server", flush=True)
+        out = ctl("restart", str(window))
+        if out.returncode != 0:
+            print(out.stderr.strip()[-300:], file=sys.stderr)
+            attempts.append({"window": window, "error": "server did not start"})
+            continue
+        rows = []
+        for fraction in fractions:
+            size = int(window * fraction) // 1000 * 1000
+            print(f"  {size:,} tokens…", end=" ", flush=True)
+            row = measure(exerciser, size, f"calibrate-{window}")
+            rows.append(row)
+            print(("ok " + (f"{row['ttft_s']:.0f} s to first token" if row["ttft_s"] else ""))
+                  if row["ok"] else f"failed ({row['error']})", flush=True)
+            if not row["ok"] and row["error"] == "insufficient_memory":
+                break
+        good = [r for r in rows if r["ok"] and r.get("prompt_tokens")]
+        attempts.append({"window": window, "rows": rows})
+        if good and max(r["prompt_tokens"] for r in good) >= window * 0.7:
+            chosen = {"window": window, "rows": rows}
+            break
+        print(f"  window {window:,} did not carry prompts to three quarters of itself", flush=True)
+
+    if chosen is None and attempts:
+        best = max((a for a in attempts if a.get("rows")), default=None,
+                   key=lambda a: max([r["prompt_tokens"] or 0 for r in a["rows"] if r["ok"]] or [0]))
+        chosen = {"window": best["window"], "rows": best["rows"]} if best else None
+
+    if chosen is None:
+        print("no window carried a prompt; is the server healthy?", file=sys.stderr)
+        return 1
+
+    good = [r for r in chosen["rows"] if r["ok"] and r.get("prompt_tokens")]
+    failed = [r for r in chosen["rows"] if not r["ok"]]
+    largest = max(r["prompt_tokens"] for r in good) if good else 0
+    ttft = sorted(r["ttft_s"] for r in good if r["ttft_s"])
+    decode = sorted(r["decode_tok_s"] for r in good if r["decode_tok_s"])
+    prefill = sorted(r["prefill_tok_s"] for r in good if r["prefill_tok_s"])
+    result = {
+        "measured_at": started, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "window": chosen["window"],
+        "largest_prompt_ok": largest,
+        "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
+        "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
+        "ttft_median_s": ttft[len(ttft) // 2] if ttft else None,
+        "ttft_at_largest_s": max(good, key=lambda r: r["prompt_tokens"])["ttft_s"] if good else None,
+        "prefill_median_tok_s": prefill[len(prefill) // 2] if prefill else None,
+        "decode_median_tok_s": decode[len(decode) // 2] if decode else None,
+        "attempts": attempts,
+        "machine": _machine_description(),
+        "ram_percent": os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70"),
+    }
+    result["headline"] = (
+        f"up to {result['comfortable_prompt']:,}-token prompts at a {result['window']:,} window"
+        + (f", about {result['ttft_median_s']:.0f} s to the first token" if result["ttft_median_s"] else "")
+        + (f", {result['decode_median_tok_s']:.1f} tok/s generating" if result["decode_median_tok_s"] else ""))
+    os.makedirs(HOME, exist_ok=True)
+    tmp = RESULT + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(result, f, indent=2)
+    os.replace(tmp, RESULT)
+    ctl("profile", str(chosen["window"]))   # keep what we settled on across restarts
+    show(result)
+    return 0
+
+
+def _machine():
+    try:
+        ram = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()) / 1e9
+    except (OSError, ValueError, subprocess.SubprocessError):
+        ram = 16.0
+    return ram, ram * 0.75
+
+
+def _machine_description():
+    ram, _ = _machine()
+    chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                          text=True).stdout.strip()
+    return f"{ram:.0f} GB {chip}".strip()
+
+
+def _ceiling(ram, working_set, percent):
+    """The largest window whose plan fits, from the same ledger window-budget.py uses."""
+    u = 27_648 / 1e9
+    target = min(33.0, percent / 100 * ram, working_set - 2.0)
+    room = target - 1.00 - 5.30 - 1.33 - 0.34 - 1.77
+    return int(max(0, min((room / u + 3 * 32_768) / 4 if room > 0 else 0, 65_536)))
+
+
+def show(result=None):
+    if result is None:
+        if not os.path.exists(RESULT):
+            print("no calibration yet: run scripts/calibrate.py")
+            return 1
+        with open(RESULT) as f:
+            result = json.load(f)
+    print("\n" + "=" * 72)
+    print(f"  {result['headline']}")
+    print("=" * 72)
+    print(f"  machine:        {result.get('machine', '?')}")
+    print(f"  window:         {result['window']:,} tokens")
+    print(f"  largest prompt: {result['largest_prompt_ok']:,} answered"
+          + (f"; {result['first_failure_at']:,} failed" if result.get("first_failure_at") else ""))
+    if result.get("ttft_at_largest_s"):
+        print(f"  at that size:   {result['ttft_at_largest_s']:.0f} s to the first token")
+    if result.get("prefill_median_tok_s"):
+        print(f"  rates:          {result['prefill_median_tok_s']:.0f} tok/s reading, "
+              f"{result.get('decode_median_tok_s') or 0:.1f} tok/s generating")
+    print(f"  measured:       {result['measured_at']}")
+    ok, why = current(result)
+    if not ok:
+        print(f"  out of date:    {why}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--window", type=int)
+    # The cap the server will actually use, so the windows we try are ones it can plan.
+    ap.add_argument("--percent", type=float,
+                    default=float(os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70")))
+    ap.add_argument("--ram", type=float)
+    ap.add_argument("--show", action="store_true")
+    ap.add_argument("--auto", action="store_true",
+                    help="run on its own when the answer is missing or stale and you are away")
+    ap.add_argument("--force", action="store_true", help="calibrate even while OpenCode is active")
+    a = ap.parse_args()
+    if a.show:
+        return show()
+    if a.auto:
+        return auto(a)
+    why = busy()
+    if why and not a.force:
+        print(why + " — run it when you are done, or pass --force", file=sys.stderr)
+        return 2
+    return run(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

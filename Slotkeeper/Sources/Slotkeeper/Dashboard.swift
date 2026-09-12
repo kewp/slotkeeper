@@ -24,6 +24,10 @@ struct DashboardView: View {
     @State private var liveWasActive = false
     @State private var liveExpanded = false
     @State private var selectedRequest: OpenCodeRequest.ID?
+    @State private var calibration: Calibration?
+    @State private var calibrating = false
+    @State private var autoCalibrationStopped = false
+    @State private var calibrationNote: String?
     @State private var hours = 24.0
 
     var body: some View {
@@ -38,7 +42,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 20).padding(.top, 16)
             TabView {
-                ScrollView { VStack(alignment: .leading, spacing: 18) { live; overview }.padding(20) }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { capacityCard; live; overview }.padding(20) }
                     .tabItem { Text("Overview") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
                     .tabItem { Text("Your work") }
@@ -189,6 +193,88 @@ struct DashboardView: View {
 
     private var livePrefillLabel: String {
         livePrefillProgressLine ?? "reading the prompt"
+    }
+
+    /// The headline: what this machine can handle, measured rather than guessed.
+    private var capacityCard: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("What this machine can handle").font(.caption).foregroundStyle(.secondary)
+                if let c = calibration {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(c.promptText).font(.system(size: 34, weight: .bold, design: .rounded))
+                        Text("token prompts").font(.title3).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 24) {
+                        ForEach(c.facts, id: \.label) { fact in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(fact.value).font(.headline)
+                                Text(fact.label).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                    }
+                    Text(c.provenance).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(calibrating ? "measuring…" : "not measured yet")
+                        .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    Text(calibrating
+                         ? "running real prompts at increasing sizes; this takes a while"
+                         : "runs on its own when you are away, or start it now")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 10) {
+                    Button(calibrating ? "Measuring…" : "Measure now") { startCalibration() }
+                        .disabled(calibrating)
+                    Button(autoCalibrationStopped ? "Resume automatic" : "Stop automatic") { toggleAutoCalibration() }
+                    if let note = calibrationNote { Text(note).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func startCalibration() {
+        calibrating = true
+        calibrationNote = "started; the server restarts as it tries each window"
+        DispatchQueue.global().async {
+            _ = DashboardView.runScriptDetached("calibrate.py", ["--quick"])
+        }
+    }
+
+    private func toggleAutoCalibration() {
+        let flag = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/calibrate.pause")
+        if autoCalibrationStopped {
+            try? FileManager.default.removeItem(at: flag)
+            calibrationNote = "automatic calibration will run again when you are away"
+        } else {
+            try? "stopped from the app".write(to: flag, atomically: true, encoding: .utf8)
+            calibrationNote = "automatic calibration stopped"
+        }
+        loadCalibration()
+    }
+
+    private func loadCalibration() {
+        let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream")
+        autoCalibrationStopped = FileManager.default.fileExists(
+            atPath: home.appendingPathComponent("calibrate.pause").path)
+        calibrating = !DashboardView.shell("/usr/bin/pgrep", ["-f", "calibrate.py"]).isEmpty
+        guard let data = try? Data(contentsOf: home.appendingPathComponent("calibration.json")),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            calibration = nil
+            return
+        }
+        calibration = Calibration(
+            comfortable: o["comfortable_prompt"] as? Int ?? 0,
+            window: o["window"] as? Int ?? 0,
+            largest: o["largest_prompt_ok"] as? Int,
+            firstFailure: o["first_failure_at"] as? Int,
+            ttft: o["ttft_median_s"] as? Double,
+            ttftAtLargest: o["ttft_at_largest_s"] as? Double,
+            decode: o["decode_median_tok_s"] as? Double,
+            prefill: o["prefill_median_tok_s"] as? Double,
+            machine: o["machine"] as? String ?? "",
+            measured: (o["finished_at"] as? String).flatMap(DashboardView.parseDate))
     }
 
     /// The one-screen answer to "how is it going": how long it has been up, what it has
@@ -609,6 +695,13 @@ struct DashboardView: View {
         runs = rs.sorted { $0.ts < $1.ts }
         loadRequests(iso: date)
         loadJobs()
+        loadCalibration()
+    }
+
+    @discardableResult
+    static func runScriptDetached(_ name: String, _ args: [String]) -> String {
+        let dir = URL(fileURLWithPath: reportPath).deletingLastPathComponent()
+        return shell("/usr/bin/env", ["python3", dir.appendingPathComponent(name).path] + args)
     }
 
     /// The job files are ours, so read them directly; only `add` goes through the script.
@@ -693,6 +786,44 @@ struct DashboardView: View {
     static var reportPath: String {
         let ctl = StatusModel.settings["SLOTSTREAM_CTL"] ?? NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper"
         return URL(fileURLWithPath: ctl).deletingLastPathComponent().appendingPathComponent("report.py").path
+    }
+}
+
+/// The measured verdict, written by scripts/calibrate.py.
+struct Calibration {
+    var comfortable: Int
+    var window: Int
+    var largest: Int?
+    var firstFailure: Int?
+    var ttft: Double?
+    var ttftAtLargest: Double?
+    var decode: Double?
+    var prefill: Double?
+    var machine: String
+    var measured: Date?
+
+    var promptText: String { comfortable >= 1000 ? "\(comfortable / 1000)K" : "\(comfortable)" }
+
+    struct Fact { var label: String; var value: String }
+    var facts: [Fact] {
+        var out = [Fact(label: "context window", value: window >= 1000 ? "\(window / 1000)K" : "\(window)")]
+        if let t = ttft { out.append(Fact(label: "to first token", value: String(format: "%.0f s", t))) }
+        if let t = ttftAtLargest, let l = largest {
+            out.append(Fact(label: "at \(l / 1000)K tokens", value: String(format: "%.0f s", t)))
+        }
+        if let d = decode { out.append(Fact(label: "generating", value: String(format: "%.1f tok/s", d))) }
+        if let p = prefill { out.append(Fact(label: "reading", value: String(format: "%.0f tok/s", p))) }
+        return out
+    }
+
+    var provenance: String {
+        var bits: [String] = []
+        if !machine.isEmpty { bits.append(machine) }
+        if let f = firstFailure { bits.append("\(f / 1000)K failed for memory") }
+        if let m = measured {
+            bits.append("measured " + m.formatted(date: .abbreviated, time: .shortened))
+        }
+        return bits.joined(separator: " · ")
     }
 }
 

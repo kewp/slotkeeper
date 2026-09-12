@@ -1,22 +1,48 @@
 import AppKit
 import SwiftUI
 
-/// Keeps the app reachable: clicking the Dock icon reopens the dashboard instead of
-/// doing nothing, which is what made the window feel like it had vanished for good.
+/// Owns the dashboard window directly.
+///
+/// A SwiftUI `Window` scene cannot be reopened from outside a view: once it is closed
+/// nothing is left listening, so the Dock icon did nothing at all. An AppKit window the
+/// delegate keeps a reference to can always be brought back.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let reopen = Notification.Name("SlotkeeperReopenDashboard")
+    static private(set) var shared: AppDelegate?
+    private var dashboard: NSWindow?
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        AppDelegate.shared = self
+        // Started by launchd at login it stays in the menu bar; opened by hand, the
+        // person wants to see something.
+        if ProcessInfo.processInfo.environment["SLOTKEEPER_BACKGROUND"] == nil {
+            showDashboard()
+        }
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { NotificationCenter.default.post(name: AppDelegate.reopen, object: nil) }
+        showDashboard()
         return true
     }
 
-    /// Launched at login by launchd, the app stays in the background; launched by hand,
-    /// the window is what the person wanted.
-    func applicationDidFinishLaunching(_ note: Notification) {
-        if ProcessInfo.processInfo.environment["SLOTKEEPER_BACKGROUND"] == nil {
-            NotificationCenter.default.post(name: AppDelegate.reopen, object: nil)
+    func showDashboard() {
+        if let window = dashboard {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return
         }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = "Slotkeeper"
+        window.contentViewController = NSHostingController(rootView: DashboardView(status: .shared))
+        window.setFrameAutosaveName("SlotkeeperDashboard")
+        window.isReleasedWhenClosed = false   // closing must not destroy it; it reopens
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        dashboard = window
     }
 }
 
@@ -27,9 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// the UI. Run with `swift run` from the package directory; the dock icon is suppressed.
 @main
 struct SlotkeeperApp: App {
-    @StateObject private var status = StatusModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @Environment(\.openWindow) private var openWindow
 
     init() {
         // A real app: Dock icon, Cmd-Tab, a Window menu. The menu bar item stays.
@@ -38,26 +62,16 @@ struct SlotkeeperApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            StatusMenu(status: status)
+            StatusMenu(status: .shared)
         } label: {
-            Label(status.menuTitle, systemImage: status.symbol)
+            Label(StatusModel.shared.menuTitle, systemImage: StatusModel.shared.symbol)
                 .labelStyle(.titleAndIcon)
         }
         .menuBarExtraStyle(.menu)
-
-        Window("Slotkeeper", id: "dashboard") {
-            DashboardView(status: status)
-                .onReceive(NotificationCenter.default.publisher(for: AppDelegate.reopen)) { _ in
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                }
-        }
-        .defaultSize(width: 1000, height: 820)
         .commands {
             CommandGroup(after: .windowList) {
-                Button("Slotkeeper Dashboard") {
-                    openWindow(id: "dashboard")
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                }.keyboardShortcut("d", modifiers: [.command, .shift])
+                Button("Slotkeeper Dashboard") { AppDelegate.shared?.showDashboard() }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }
     }
@@ -110,10 +124,8 @@ struct StatusMenu: View {
             Button("Start Exerciser") { status.run("exerciser", "start") }
         }
         Divider()
-        Button("Open Dashboard…") {
-            openWindow(id: "dashboard")
-            NSApplication.shared.activate(ignoringOtherApps: true)
-        }.keyboardShortcut("d", modifiers: [.command, .shift])
+        Button("Open Dashboard…") { AppDelegate.shared?.showDashboard() }
+            .keyboardShortcut("d", modifiers: [.command, .shift])
         Button("Copy Endpoint") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(status.endpoint, forType: .string)
@@ -136,6 +148,8 @@ enum ServerState: String {
 
 @MainActor
 final class StatusModel: ObservableObject {
+    /// One model for the menu bar and the dashboard window, which AppKit owns.
+    static let shared = StatusModel()
     @Published var state: ServerState = .stopped
     @Published var version = ""
     @Published var plan = PlanSummary()
