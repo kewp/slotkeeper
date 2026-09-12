@@ -31,8 +31,8 @@
 #                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
-# deep disables the prefill-wait budget (a full 65K prompt needs ~13 min before its first token);
-# the others keep SLOTSTREAM_MAX_PREFILL_WAIT (default 10 minutes).
+# The prefill-wait budget follows the window: 10 minutes up to 32K, twice the estimated
+# full-window prefill above that, and none at 65,536 where a full prompt can take half an hour.
 # While the server runs it holds `caffeinate -s` so an evening task is not cut off by idle sleep;
 # that assertion applies on AC power only. SLOTSTREAM_CAFFEINATE=0 disables it.
 #
@@ -123,9 +123,14 @@ check_disk() {
 }
 
 prefill_wait_for() {
-  # $1 = context tokens. An explicit SLOTSTREAM_MAX_PREFILL_WAIT wins; otherwise deep (>= 65536) gets no budget.
+  # $1 = context tokens. An explicit SLOTSTREAM_MAX_PREFILL_WAIT wins. Otherwise the budget
+  # follows the window: a full-length prompt has to fit inside it, and prefill here runs at
+  # roughly 40 tok/s, so 10 minutes only covers ~24K. Measured 2026-09-12 at a 49,152 window:
+  # 24K, 36K and 44K prompts all died on the 10-minute budget while memory was fine.
+  # Above the everyday window the budget scales with the window; at or above 65,536 it is off.
   if [[ -n "${SLOTSTREAM_MAX_PREFILL_WAIT:-}" ]]; then echo "$SLOTSTREAM_MAX_PREFILL_WAIT"
   elif (( $1 >= 65536 )); then echo 0
+  elif (( $1 > 32768 )); then echo $(( ($1 / 40 / 60) * 2 ))
   else echo "$SLOTSTREAM_MAX_PREFILL_WAIT_DEFAULT"; fi
 }
 
