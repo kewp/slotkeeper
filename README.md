@@ -21,6 +21,10 @@ What you get:
   OpenCode requests turn by turn, the job queue, the synthetic suite's charts,
   the installed build with its log, and a health page for the background
   services, disk, battery and pressure level.
+- **Capacity calibration** (`scripts/calibrate.py`): measures what this machine
+  actually handles and says so in one line, on its own and without tweaking.
+- **Overnight job runner** (`scripts/jobs.py`): queue coding tasks, run them one
+  at a time while you are away, read what they cost and changed in the morning.
 - **Continuous exerciser** (`scripts/exerciser.py`): a rotating suite of
   realistic and adversarial tasks that measures cost and behaviour around the
   clock, yields to your own requests and to battery, and can be paused from
@@ -73,6 +77,13 @@ scripts/report.py --hours 24                # your OpenCode sessions first, then
 scripts/exerciser.py --sweep auto --label everyday   # TTFT by prompt size, sizes from the window
 scripts/bench.py --label mytest             # one-off measurement
 scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)
+scripts/slotkeeper calibrate         # measure what this machine handles, and write the verdict
+scripts/slotkeeper calibrate auto start   # keep that verdict current on its own
+scripts/slotkeeper capacity --window 49152   # what a window costs in memory, from the planner's ledger
+scripts/slotkeeper jobs add ~/myrepo "add tests for X" --auto   # queue an overnight task
+scripts/slotkeeper jobs daemon start # run queued jobs between 00:00 and 07:00
+scripts/slotkeeper jobs report       # what ran overnight, what it cost, what changed
+scripts/selftest.sh                  # check this checkout without loading the model
 scripts/slotkeeper bundle            # support bundle for bug reports
 ```
 
@@ -137,6 +148,53 @@ conversations. To keep whole conversations, put
 | `SLOTSTREAM_DEVELOPMENT.md` | How Slotstream is built, what is hard to change, how to patch and ship it |
 | `SLOTSTREAM_RECOVERY.md` | The author's installed build, validation evidence, rebuild and rollback procedure |
 | `CLAUDE.md` | Operating rules for AI assistants working in this repo |
+
+## What can this machine handle?
+
+`scripts/slotkeeper calibrate` answers it by measuring rather than guessing. It
+restarts the server at the largest window the memory allows, sends real prompts
+at a quarter, half and three quarters of that window, steps the window down when
+a size fails for memory, and stops when a window carries prompts to three
+quarters of itself. The verdict lands in `~/.slotstream/calibration.json` and at
+the top of the app:
+
+```
+up to 24,000-token prompts at a 32,768 window, about 60 s to the first token
+```
+
+`scripts/slotkeeper calibrate auto start` keeps that current without being
+asked. It measures when there is no valid answer (new machine, changed memory
+settings, rebuilt server, or older than a month) and only while you are away: at
+night or after half an hour without keyboard or mouse input, never on battery,
+during a job, or while your own OpenCode session is running. Stop it from the
+app, or with `scripts/slotkeeper calibrate auto stop`.
+
+`scripts/slotkeeper capacity` does the arithmetic instead of the experiment.
+Every context token costs 27,648 bytes wherever it appears, so with the whole
+conversation retained each 1,000 tokens of window costs about 0.11 GB on top of
+a 9.7 GB base. It agrees with the running server to within 0.03 GB.
+
+## Leaving work overnight
+
+A local model that answers a 25K-token turn in a minute is slow for chatting and
+fine for a task you are not waiting on. `jobs` queues those:
+
+```sh
+scripts/slotkeeper jobs add ~/prices-app "Write unit tests for the price parser" --auto
+scripts/slotkeeper jobs daemon start      # starts jobs only in JOBS_HOURS (default 00:00-07:00)
+scripts/slotkeeper jobs report            # in the morning
+```
+
+Each job is one `opencode run` in one repository. The runner takes one at a time
+and waits while you are using OpenCode yourself, on battery, under critical
+memory pressure, or outside the window. A job refused for memory is retried, and
+the server keeps the prefix it had already read, so the retry resumes rather
+than re-reading the prompt. The transcript is in `~/.slotstream/jobs/logs/`.
+
+`--auto` passes OpenCode's own `--auto`, which approves every tool call the
+model makes, including shell commands. Unattended runs need it. Use it on a
+repository whose working tree you are willing to have rewritten, and review the
+diff in the morning; the runner records the diff stat and never commits for you.
 
 ## On another machine
 

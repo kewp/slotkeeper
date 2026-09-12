@@ -114,6 +114,21 @@ Task names: `short-chat`, `code-review`, `multi-turn`, `multi-turn-long`,
  "label":"","pid":88342,"updated":"..."}
 ```
 
+### 1.6b `jobs/` and `calibration.json`
+
+`~/.slotstream/jobs/{queued,running,done}/<id>.json`, one file per job, moved
+between folders as it progresses; `logs/<id>.log` is the transcript;
+`jobs.pause` holds the runner. Fields: `id, created, repo, task, agent, auto,
+label, session, attempts, result` and, once run, `started, finished, elapsed_s,
+exit_code, changed_files, commits, diff_stat`. `result` is one of `queued, ok,
+failed, memory, retrying, timeout`.
+
+`~/.slotstream/calibration.json` is the measured verdict: `headline, window,
+largest_prompt_ok, comfortable_prompt, first_failure_at, ttft_median_s,
+ttft_at_largest_s, prefill_median_tok_s, decode_median_tok_s, machine,
+ram_percent, measured_at, finished_at, attempts[]`. The app's headline card
+reads it directly; `calibrate.pause` stops the automatic runs.
+
 ### 1.7 `exerciser.pause`
 
 Presence means paused; contents are the reason. Created by
