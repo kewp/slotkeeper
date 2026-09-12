@@ -1,0 +1,73 @@
+diff -ruN a/Sources/Slotstream/PlannerDevice.swift b/Sources/Slotstream/PlannerDevice.swift
+--- a/Sources/Slotstream/PlannerDevice.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/PlannerDevice.swift	2026-09-12 14:10:23
+@@ -9,7 +9,22 @@
+         Double(ProcessInfo.processInfo.physicalMemory) / 1e9
+     }
+ 
++    /// What Metal recommends this process keep resident, in GB.
++    ///
++    /// `maxRecommendedWorkingSetSize` is a recommendation, not a hardware wall: it is
++    /// about three quarters of RAM on Apple Silicon, and the planner treats it as a hard
++    /// bound on the expected peak, which leaves the rest of the machine unused. Whether
++    /// exceeding it costs anything is a question for measurement on the machine in front
++    /// of you, so `SLOTSTREAM_WORKING_SET_GB` sets it. Above the recommendation Metal may
++    /// start paging its own allocations, which is exactly what a calibration run watches
++    /// for when it checks that the machine stayed responsive.
++    public nonisolated(unsafe) static var workingSetOverrideGB: Double? =
++        ProcessInfo.processInfo.environment["SLOTSTREAM_WORKING_SET_GB"]
++            .flatMap(Double.init)
++            .flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
++
+     public static func deviceWorkingSetGB() -> Double {
++        if let override = workingSetOverrideGB { return override }
+         let ws = Double(MLX.GPU.deviceInfo().maxRecommendedWorkingSetSize) / 1e9
+         return ws > 0 ? ws : deviceRAMGB() * 0.75
+     }
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-12 11:16:42
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-12 14:10:23
+@@ -2,6 +2,32 @@
+ import Slotstream
+ 
+ extension Diagnostics {
++    /// Metal's recommended working set is a recommendation, and we can say otherwise.
++    public static func workingSetOverride() -> CheckReport {
++        var c = CheckBuilder("working-set-override")
++        let saved = Planner.workingSetOverrideGB
++        defer { Planner.workingSetOverrideGB = saved }
++        Planner.workingSetOverrideGB = nil
++        let recommended = Planner.deviceWorkingSetGB()
++        c.expect("the device reports a positive working set", recommended > 0)
++        Planner.workingSetOverrideGB = recommended + 6
++        c.equal("an override replaces it", Planner.deviceWorkingSetGB(), recommended + 6)
++        Planner.workingSetOverrideGB = 0
++        c.equal("a nonsense override is ignored at load", Planner.deviceWorkingSetGB(),
++                Planner.workingSetOverrideGB == nil ? recommended : 0)
++        Planner.workingSetOverrideGB = nil
++        // A plan the working set refuses must become possible when the bound is raised,
++        // because that bound is the only thing standing between it and the memory.
++        func fits(_ workingSet: Double) -> Bool {
++            (try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 20,
++                ramGB: 26, workingSetGB: workingSet, availableGB: 24, vision: .off,
++                maxContextTokens: 65_536, simulated: true, qualification: true)) != nil
++        }
++        c.expect("the recommendation refuses a plan that a larger bound admits",
++                 !fits(19.0) && fits(24.0))
++        return c.report()
++    }
++
+     /// The safety headroom is a policy we can set, so a measurement can vary it.
+     public static func availabilitySlack() -> CheckReport {
+         var c = CheckBuilder("availability-slack")
+diff -ruN a/Sources/SlotstreamTestKit/T0Checks.swift b/Sources/SlotstreamTestKit/T0Checks.swift
+--- a/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-12 11:14:37
++++ b/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-12 14:10:23
+@@ -23,6 +23,7 @@
+             Check("prefix-client-capacity", tier: .t0) { try Diagnostics.optimizationPrefixCapacity() },
+             Check("beyond-qualified-context", tier: .t0) { Diagnostics.beyondQualifiedContext() },
+             Check("availability-slack", tier: .t0) { Diagnostics.availabilitySlack() },
++            Check("working-set-override", tier: .t0) { Diagnostics.workingSetOverride() },
+             Check("governor-check", tier: .t0) { Diagnostics.governorPolicy() },
+             Check("request-pressure-policy", tier: .t0) { Diagnostics.requestPressurePolicy() },
+             Check("pull-check", tier: .t0) { try Diagnostics.pullIntegrity() },

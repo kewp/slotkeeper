@@ -149,7 +149,9 @@ older than 10 minutes (OpenCode may have been killed).
 
 ### 1.9 Server log `slotstream.log`
 
-Human text. Lines the app already parses:
+Human text. The app tails this file into the Server tab as raw text; it does
+**not** parse these lines into the live request view. Parsing the progress line
+is the open work item that would make a long prefill legible in the app:
 
 ```
 [17:47:25] prefill: reading 19726 prompt tokens, ~2.0 min to the first token at this plan (...)

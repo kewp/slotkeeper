@@ -42,6 +42,7 @@ patch_status() {
   if grep -q "committed prompt tokens for a retry" <<<"$dump"; then echo "  resume-after-refusal patch: present"; else echo "  resume-after-refusal patch: absent"; fi
   if grep -q "beyond-qualified-context" <<<"$dump"; then echo "  window-beyond-qualified patch: present"; else echo "  window-beyond-qualified patch: absent"; fi
   if grep -q "SLOTSTREAM_AVAILABILITY_SLACK_GB" <<<"$dump"; then echo "  settable-headroom patch: present"; else echo "  settable-headroom patch: absent"; fi
+  if grep -q "SLOTSTREAM_WORKING_SET_GB" <<<"$dump"; then echo "  working-set patch: present"; else echo "  working-set patch: absent"; fi
 }
 if (( STATUS )); then patch_status; exit 0; fi
 

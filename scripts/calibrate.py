@@ -13,14 +13,14 @@ start while your own OpenCode session is active.
 
 Usage:
   calibrate.py                 full run: pick a window, find the largest prompt it carries
-  calibrate.py --quick         three sizes per window instead of four
+  calibrate.py --quick         one prompt per window instead of three
   calibrate.py --window 32768  test one window only
   calibrate.py --show          print the last calibration without measuring
   calibrate.py --auto          keep the answer current on its own: waits until you are away,
                                measures when there is no valid calibration, then rechecks hourly
                                (stop it with ~/.slotstream/calibrate.pause, or from the app)
 """
-import argparse, importlib.util, json, os, subprocess, sys, time
+import argparse, importlib.util, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 
 HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
@@ -223,6 +223,7 @@ def measure(exerciser, size, label):
     prompt, est, files = exerciser.build_codebase_prompt(size)
     if not files:
         return {"size": size, "ok": False, "note": "no source files to build a prompt from"}
+    offset = log_offset()
     t0 = time.monotonic()
     result = exerciser.chat(
         [{"role": "user", "content": f"Summarise in two sentences what these files do.\n\n{prompt}"}],
@@ -233,6 +234,8 @@ def measure(exerciser, size, label):
            "elapsed_s": round(time.monotonic() - t0, 1),
            "error": (result.get("error") or {}).get("code") if isinstance(result.get("error"), dict) else result.get("error")}
     row["ok"] = not row["error"] and bool(result.get("text", "").strip())
+    row["prefill_curve"] = prefill_curve(offset)
+    row["prefill_decay"] = curve_summary(row["prefill_curve"])
     record(exerciser, row, result)
     return row
 
@@ -246,6 +249,7 @@ def log_probe(row, retention):
                 prompt_tokens=row.get("prompt_tokens"), ok=row.get("ok"),
                 ttft_s=row.get("ttft_s"), prefill_tok_s=row.get("prefill_tok_s"),
                 decode_tok_s=row.get("decode_tok_s"), elapsed_s=row.get("elapsed_s"),
+                prefill_decay=row.get("prefill_decay"),
                 reason=reason or ("answered" if row.get("ok") else "no answer"))
 
 
@@ -297,6 +301,61 @@ def working_set_value(spec):
         _, working_set = _machine()
         return f"{working_set + float(str(spec)[1:]):.1f}"
     return str(spec)
+
+
+SERVER_LOG = os.path.join(HOME, "slotstream.log")
+
+
+def log_offset():
+    """Where the server log ends right now, so a probe can read only its own lines."""
+    try:
+        return os.path.getsize(SERVER_LOG)
+    except OSError:
+        return 0
+
+
+def prefill_curve(offset):
+    """The decay curve for one prefill, from the server's own progress lines.
+
+    The server reports `prefill: 51200/100369 tokens (51%), ~9.7 min left` every few
+    thousand tokens. A single averaged `prefill_tok_s` hides what those lines show: the
+    rate starts near 100 tok/s and falls as the prompt's context state squeezes the
+    expert pool. The curve is the measurement; the average is a summary of it.
+    """
+    try:
+        with open(SERVER_LOG, errors="replace") as f:
+            f.seek(offset)
+            lines = [l for l in f if "prefill:" in l]
+    except OSError:
+        return []
+    points, prev = [], None
+    for line in lines:
+        stamp = re.match(r"\[(\d\d):(\d\d):(\d\d)\]", line)
+        if not stamp:
+            continue
+        t = int(stamp.group(1)) * 3600 + int(stamp.group(2)) * 60 + int(stamp.group(3))
+        if "reading" in line:
+            prev = (t, 0)
+            continue
+        step = re.search(r"(\d+)/(\d+) tokens", line) or re.search(r"done, (\d+) tokens", line)
+        if not step or prev is None:
+            continue
+        done = int(step.group(1))
+        dt, dtok = t - prev[0], done - prev[1]
+        if dt > 0 and dtok > 0:
+            points.append({"at_token": done, "tok_s": round(dtok / dt, 1)})
+        prev = (t, done)
+    return points
+
+
+def curve_summary(points):
+    """First rate, last rate, and how far it fell — the one line worth logging."""
+    if len(points) < 2:
+        return None
+    first, last = points[0]["tok_s"], points[-1]["tok_s"]
+    return {"first_tok_s": first, "last_tok_s": last,
+            "decay": round(first / last, 2) if last else None,
+            "knee_at_token": next((p["at_token"] for p in points if p["tok_s"] < first / 2), None)}
 
 
 def server_refusal():

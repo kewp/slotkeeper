@@ -48,7 +48,7 @@ is a constant someone chose, and this project has already changed seven of them.
 | 68 GB of experts on a 24 GB machine | Most of each token is streamed from SSD. Generation sits near 3 tok/s here and rises with memory because more experts stay cached. Different hardware is the only lever. |
 | 27,648 bytes per context token | The model's own state size. It sets what a window costs: about 0.11 GB per 1,000 tokens with the whole conversation kept. |
 | 262,144-token checkpoint limit | The positions the checkpoint was configured for. Beyond it is a different model, not a setting. |
-| Prefill roughly linear in tokens, slower at long positions | Attention over a growing context. Measured 89 tok/s at 19K falling to 33 tok/s at 54K on this machine. |
+| Prefill slows as the prompt grows | Real, but the *shape* is not settled and the cause may not be physics at all — see "Still to decide". Attention over a growing context explains a gentle decline; measured 2026-09-12 it fell far faster than that. |
 
 ## Still to decide
 
@@ -59,3 +59,4 @@ is a constant someone chose, and this project has already changed seven of them.
 | Per-pass admission refusal | A long prompt is refused when one pass does not fit, rather than the pass being made smaller. Patch seven: fall back to a smaller chunk in place, instead of failing the request. |
 | The 1 GB planning margin | A guard against the machine becoming unusable, not yet settable. Measure whether it can be smaller before making it another rung. |
 | What else is running | A target that fails while a browser holds memory can succeed on a quiet machine: 17.3 GB was refused at 10:47 and started at 11:06. The verdict records the machine's state, and calibration prefers to run when you are away. |
+| **The prefill decay knee** | Prefill slowed within a single 100,369-token prompt on 2026-09-12: 95.9 → 72.7 → 25.2 tok/s. The obvious hypothesis — context state squeezing the expert pool until passes stream from SSD — is **not supported**: `metrics/2026-09-12.jsonl` sampled every 30 s through the whole prefill and `experts_per_layer` held at 25, `pool_gb` at 3.4, pressure normal, free 68-78%. Nothing was evicted. The last and steepest segment is also confounded: heavy disk work (a `du` over the 98 GB model directory, `shasum` and `strings` over release binaries, a recursive tree diff) ran against the SSD this model streams experts from, during exactly that window. What is needed is a re-measurement on a quiet machine, with the curve recorded per probe, before any cause is claimed. The first two segments (95.9 → 72.7) are the only part currently trustworthy. |

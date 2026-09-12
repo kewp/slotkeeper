@@ -43,13 +43,23 @@ which is exactly what calibration reports per machine.
    up are refused for memory while the machine reports normal pressure. Retries resume
    rather than restart, but ratchet to about 30K and stall. The fix is to fall back to a
    smaller prefill chunk instead of refusing: patch seven.
-4. **Windows above 65,536 are now allowed** (`--beyond-qualified-context`, patch six).
-   The planner prices any window and refuses one that does not fit, so the machine
-   decides. What is still missing is a measurement above 65,536 on a machine with the
-   memory for it.
+4. **Windows above 65,536 are measured, not just allowed** (`--beyond-qualified-context`,
+   patch six). On 2026-09-12 a **131,072-token window carried a 100,369-token prompt and
+   answered it** on this 24 GB M4 Pro, at an 18.6 GB memory target with the whole
+   conversation retained: 47.6 min of prefill at a 35.1 tok/s average, then 2.93 tok/s
+   generating. Acceptance needed 91,750 tokens; it cleared by 8,600. That is the
+   measurement this item was waiting for. Caveats: the machine was not quiet (see item 1),
+   and the search was stopped after the deciding prompt, so no `calibration.json` was
+   written — the row is in `calibration-attempts.jsonl`.
 5. **The five patches are not upstreamed.** Pull-request text is written in
    `patches/README.md`.
-6. **The search has not yet completed a full run.** Calibration now searches memory
+6. **The app does not show live prefill progress**, though the server has written
+   it all along. `slotstream.log` carries `prefill: 75520/100369 tokens (75%),
+   ~8.6 min left` every few thousand tokens; the app tails that file as raw text
+   on the Server tab and never parses it, so a 39-minute prefill looks stalled.
+   README and `APP_IMPLEMENTATION.md` both claimed this was built until
+   2026-09-12; it never was. Parsing one line is the whole fix.
+7. **The search has not yet completed a full run.** Calibration now searches memory
    target and window, including above 65,536, and `setup.sh` installs it on a fresh
    machine; one clean end-to-end run on this Mac is what proves it.
 
@@ -97,9 +107,17 @@ actual safety margin is the 1 GB planning margin plus an availability slack of
 
 ## Next, in order
 
-1. Let the calibration search finish a full run here, and fix what it exposes.
-2. Fall back to a smaller prefill chunk when a pass does not fit, so a long prompt
+1. **Re-measure the prefill decay on a quiet machine.** Prefill fell 95.9 → 72.7 →
+   25.2 tok/s within one 100,369-token prompt on 2026-09-12, but the expert-eviction
+   explanation is refuted by our own 30-second samples (experts held at 25/layer,
+   pool at 3.4 GB, pressure normal throughout), and the steepest segment coincided
+   with heavy disk work from the investigation itself. The decay is real in the first
+   two segments; its cause and shape are unknown. This outranks the rest because every
+   ETA, the capacity ledger and the calibration headline assume one flat prefill rate,
+   and the log shows the rate is not flat.
+2. Let the calibration search finish a full run here, and fix what it exposes.
+3. Fall back to a smaller prefill chunk when a pass does not fit, so a long prompt
    degrades instead of failing (patch seven).
-3. Run one real job end to end and fix what that exposes.
-4. Score quality on a fixed task set, so "useful" stops being an assumption.
-5. Upstream the patches.
+4. Run one real job end to end and fix what that exposes.
+5. Score quality on a fixed task set, so "useful" stops being an assumption.
+6. Upstream the patches.
