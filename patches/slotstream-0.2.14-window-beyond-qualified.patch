@@ -1,0 +1,92 @@
+diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-11 16:44:16
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-12 10:42:50
+@@ -2,6 +2,34 @@
+ import Slotstream
+ 
+ extension Diagnostics {
++    /// Windows above the qualified envelope are a memory question, not a forbidden one.
++    public static func beyondQualifiedContext() -> CheckReport {
++        var c = CheckBuilder("beyond-qualified-context")
++        c.expect("the qualified envelope still refuses a larger window by default",
++            ContextPolicy.validationError(98_304) != nil)
++        c.expect("an explicit qualification admits it",
++            ContextPolicy.validationError(98_304, qualification: true) == nil)
++        c.expect("the model's own limit is still a limit",
++            ContextPolicy.validationError(ContextPolicy.modelLimit + 1, qualification: true) != nil)
++        c.equal("the largest admitted window is the checkpoint's",
++            ContextPolicy.validationError(ContextPolicy.modelLimit, qualification: true), nil)
++        // The planner must price it rather than wave it through: a 98,304 window on a
++        // small machine does not fit, and on a large one it does.
++        let small = try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 11,
++            ramGB: 26, workingSetGB: 19, availableGB: 24, vision: .off,
++            maxContextTokens: 98_304, simulated: true, qualification: true)
++        c.expect("a window that does not fit is refused before loading", small == nil)
++        let large = try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 40,
++            ramGB: 64, workingSetGB: 48, availableGB: 60, vision: .off,
++            maxContextTokens: 98_304, simulated: true, qualification: true)
++        c.expect("the same window fits where the memory is there", large != nil)
++        if let plan = large {
++            c.equal("and it is priced at the window asked for", plan.maxContextTokens, 98_304)
++            c.expect("with the pool paying for it", plan.slots > Geometry.floorSlots)
++        }
++        return c.report()
++    }
++
+     public static func configurableContext() throws -> CheckReport {
+         var c = CheckBuilder("configurable-context")
+         let cacheModel = UUID(), cacheOptions = InferenceOptimizations()
+diff -ruN a/Sources/SlotstreamTestKit/T0Checks.swift b/Sources/SlotstreamTestKit/T0Checks.swift
+--- a/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-11 17:31:54
++++ b/Sources/SlotstreamTestKit/T0Checks.swift	2026-09-12 10:41:25
+@@ -21,6 +21,7 @@
+             Check("pressure-boundary", tier: .t0) { Diagnostics.optimizationPressureBoundary() },
+             Check("runtime-check", tier: .t0) { try Diagnostics.runtime() },
+             Check("prefix-client-capacity", tier: .t0) { try Diagnostics.optimizationPrefixCapacity() },
++            Check("beyond-qualified-context", tier: .t0) { Diagnostics.beyondQualifiedContext() },
+             Check("governor-check", tier: .t0) { Diagnostics.governorPolicy() },
+             Check("request-pressure-policy", tier: .t0) { Diagnostics.requestPressurePolicy() },
+             Check("pull-check", tier: .t0) { try Diagnostics.pullIntegrity() },
+diff -ruN a/Sources/slotstream-cli/main.swift b/Sources/slotstream-cli/main.swift
+--- a/Sources/slotstream-cli/main.swift	2026-09-11 18:52:39
++++ b/Sources/slotstream-cli/main.swift	2026-09-12 10:41:25
+@@ -496,10 +496,28 @@
+     @Flag(name: .customLong("no-prefix-cache"),
+           help: "Re-prefill every request from scratch. Default: the state of one request is reused by the next when that request's prompt extends it, so a chat turn only prefills what is new.")
+     var noPrefixCache = false
++    @Flag(
++        name: .customLong("beyond-qualified-context"),
++        help: ArgumentHelp(
++            "Allow a window above \(ContextPolicy.implementationLimit), up to the model's \(ContextPolicy.modelLimit).",
++            discussion: """
++                The released implementation limit is a measured serving envelope, not a \
++                hardware or correctness boundary: the checkpoint is configured for \
++                \(ContextPolicy.modelLimit) tokens, and the planner prices any window \
++                honestly before loading, so a window that does not fit is refused at \
++                startup rather than failing later. Past the qualified envelope the \
++                memory arithmetic still holds and the timings are simply unmeasured, \
++                which is what the calibration in Slotkeeper measures per machine. Use \
++                it when the machine has the memory and you want the window.
++                """))
++    var beyondQualifiedContext = false
+ 
+     func run() throws {
+-        if let why = ContextPolicy.validationError(maxContext) { throw PlanError(why) }
+-        let plan = try model.announcedPlan(maxContext: maxContext, prefixCacheEnabled: !noPrefixCache, maxPrefillWait: maxPrefillWait)
++        if let why = ContextPolicy.validationError(maxContext, qualification: beyondQualifiedContext) {
++            throw PlanError(why)
++        }
++        let plan = try model.announcedPlan(maxContext: maxContext, prefixCacheEnabled: !noPrefixCache,
++                                           maxPrefillWait: maxPrefillWait, qualification: beyondQualifiedContext)
+         // Claim the port first: failing here after a full model load wastes
+         // half a minute and used to be a fatalError.
+         let listenFD = try Server.bindPort(port)
+@@ -512,7 +530,7 @@
+         }
+         sem.wait()
+         if let e = err { throw e }
+-        engine.maxContextTokens = maxContext
++        engine.maxContextTokens = maxContext   // the plan carries the qualification flag
+         // Long prompts announce themselves in the server log with the wait to
+         // expect, then report by quarters; anything under 2k tokens is quiet.
+         let progress = PrefillProgressReporter(

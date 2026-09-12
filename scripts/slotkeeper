@@ -34,6 +34,8 @@
 #                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
 # Profiles (prompt+reply window): everyday=32768  conservative=16384  deep=65536, or a number.
+# A number above 65536 is allowed and passed with --beyond-qualified-context: the window is
+# a memory question, and the planner refuses one that does not fit before the model loads.
 # The prefill-wait budget follows the window: 10 minutes up to 32K, twice the estimated
 # full-window prefill above that, and none at 65,536 where a full prompt can take half an hour.
 # While the server runs it holds `caffeinate -s` so an evening task is not cut off by idle sleep;
@@ -43,6 +45,8 @@
 #   SLOTSTREAM_HOME (default ~/.slotstream)   SLOTSTREAM_BIN   SLOTSTREAM_PORT (11434)
 #   SLOTSTREAM_MODEL (qwen3.8-flash-next:4bit)   SLOTSTREAM_MAX_PREFILL_WAIT (10 minutes)
 #   SLOTSTREAM_MAX_RAM_PERCENT (unset = Slotstream default 70)   SLOTSTREAM_VISION (off)
+#   SLOTSTREAM_MEMORY_GB (unset = auto) explicit total-memory target; beats the RAM share
+#     and auto's model ceiling. Calibration writes it when a larger target measures better.
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
 #   SLOTSTREAM_PREFIX_CACHE_TOKENS (unset = Slotstream auto; a number or `full` retains whole
 #     conversations, needs the prefix-retention patch; read by the binary itself from the environment)
@@ -142,7 +146,13 @@ serve_args() {
   # Fills SERVE_ARGS (bash 3.2 on macOS has no mapfile).
   local context="$1"
   local args=(serve --model "$SLOTSTREAM_MODEL" --port "$SLOTSTREAM_PORT" --max-context "$context" --max-prefill-wait "$(prefill_wait_for "$context")" --vision "$SLOTSTREAM_VISION")
-  [[ -n "${SLOTSTREAM_MAX_RAM_PERCENT:-}" ]] && args+=(--max-ram-percent "$SLOTSTREAM_MAX_RAM_PERCENT")
+  # An explicit total-memory target beats the share: it is how calibration goes past
+  # auto's model ceiling when a machine has the memory to spare.
+  # Above the qualified envelope the server needs to be told we mean it; the planner
+  # still refuses a window that does not fit, which is the check that matters.
+  (( context > 65536 )) && args+=(--beyond-qualified-context)
+  if [[ -n "${SLOTSTREAM_MEMORY_GB:-}" ]]; then args+=(--memory-gb "$SLOTSTREAM_MEMORY_GB")
+  elif [[ -n "${SLOTSTREAM_MAX_RAM_PERCENT:-}" ]]; then args+=(--max-ram-percent "$SLOTSTREAM_MAX_RAM_PERCENT"); fi
   # shellcheck disable=SC2206
   [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && args+=($SLOTSTREAM_EXTRA_ARGS)
   SERVE_ARGS=("${args[@]}")

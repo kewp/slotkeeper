@@ -2,9 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## The goal, which overrides everything below
+
+**Automatically work out what this model can do on the Mac it is running on, and say
+so.** No tuning by hand, no per-machine advice, no asking the user to try settings.
+
+Rules that follow from it, and that beat any earlier decision in this repo:
+
+- **A limit in Slotstream is a work item, not an answer.** We patch Slotstream; there
+  are six patches in `patches/` already. Never write or say "we can't, Slotstream caps
+  it at X". Write down what the cap is, what it would take to lift it, and lift it when
+  it stands between us and the goal.
+- **A constant we chose earlier is not evidence.** The 55% memory cap, the 32K window,
+  the ten-minute prefill budget: each was a workaround for a failure on one machine on
+  one day. Calibration measures the real answer per machine and overwrites them. If a
+  number is in `ctl.env` and calibration disagrees, calibration wins.
+- **Measure, don't assume.** Every claim about what a machine can do must come from a
+  recorded measurement on that machine, or be labelled as arithmetic from the planner's
+  ledger.
+- **Degrade, never refuse.** When something does not fit, the server gives up the
+  cheapest thing (retention, then pool, then chunk size) and keeps serving. Refusing a
+  request is the last resort, and it is a bug report against this rule.
+- **The user should never have to run the experiment.** If an answer needs a
+  measurement, the software takes the measurement itself, when the machine is free.
+
 ## What this is
 
-The home of a larger effort: run a local model (Slotstream serving Qwen3.8-Flash-Next on a 24 GB M4 Pro) continuously while the Mac stays usable. It holds:
+The home of a larger effort: work out automatically what a local model (Slotstream serving Qwen3.8-Flash-Next) can do on whatever Mac it is running on, and run it there continuously while the Mac stays usable. The 24 GB M4 Pro this was written on is one data point, not the target. It holds:
 
 - `model-stats.ts`: single-file OpenCode plugin with live prefill timing, completion stats, and failure diagnostics.
 - `patches/`: five Slotstream source patches, applied in alphabetical order: retry wording + server-side failure logging, then prefix retention (`--prefix-cache-tokens n|full` on `RuntimeAllocationPolicy`, charged against the pool), then the governor pressure ceiling (no regrowth past the pool that met pressure for 20 min), then resume-after-refusal (a boundary-safe failure keeps its committed prefix; a shrink no longer drops a large one), then the stale-pressure cross-check (`RequestPressurePolicy`). `scripts/slotkeeper patch --status` shows which are in the installed binary. After changing a public struct's stored fields, clean `.build/arm64-apple-macosx/debug` before `make checks`: an incremental build once left the test module on the old layout and a check failed with a nonsense value. Regenerate an incremental patch with `diff -ruN -x .build -x lib -x '*.orig' <before> <after>` and rewrite the path prefixes to `a/` and `b/`.

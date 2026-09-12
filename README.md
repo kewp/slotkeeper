@@ -35,7 +35,10 @@ What you get:
   retryable by OpenCode, and stop a stale OS pressure level from refusing
   requests. Optional; everything else works on stock Slotstream.
 
-Tested on one machine: a 24 GB M4 Pro MacBook, macOS 26, Slotstream 0.2.14,
+The point is that you should not have to tune any of this: `slotkeeper calibrate`
+measures what your Mac can do and writes the settings itself.
+
+Developed on a 24 GB M4 Pro MacBook, macOS 26, Slotstream 0.2.14,
 OpenCode 1.18.30. Expect rough edges elsewhere and read the traps in
 `APP_IMPLEMENTATION.md`.
 

@@ -40,6 +40,7 @@ JOBS = os.path.join(HOME, "jobs", "running")
 STALE_DAYS = 30
 IDLE_MINUTES = 30       # how long you must be away before it takes the server
 NIGHT_HOURS = (0, 7)
+MIN_TARGET_GB = 8.5      # below this the planner refuses: floor cache plus the fixed footprint
 
 
 def load(name):
@@ -194,69 +195,179 @@ def measure(exerciser, size, label):
     return row
 
 
-def run(args):
-    exerciser = load("exerciser")
-    windows = [args.window] if args.window else None
-    if windows is None:
-        ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
-        ceiling = _ceiling(ram, working_set, args.percent)
-        windows = [w for w in (65_536, 49_152, 32_768, 16_384) if w <= ceiling] or [16_384]
-    fractions = (0.25, 0.5, 0.75) if args.quick else (0.25, 0.5, 0.75, 0.9)
+def set_env(key, value):
+    """Persist a setting in ctl.env, which every script and the app read."""
+    path = os.path.join(HOME, "ctl.env")
+    lines = []
+    if os.path.exists(path):
+        lines = [l for l in open(path).read().splitlines() if not l.startswith(key + "=")]
+    if value is not None:
+        lines.append(f"{key}={value}")
+    with open(path + ".tmp", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(path + ".tmp", path)
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = str(value)
 
+
+def restart(window, target_gb):
+    """Bring the server up at one configuration. False when it will not start there."""
+    set_env("SLOTSTREAM_MEMORY_GB", f"{target_gb:.1f}" if target_gb else None)
+    LAST_GOOD["dirty"] = True
+    out = ctl("restart", str(window))
+    if out.returncode == 0:
+        LAST_GOOD["config"] = (window, target_gb)
+    if out.returncode != 0:
+        print(f"    server would not start at {target_gb:.1f} GB / {window:,}: "
+              + (out.stderr or out.stdout).strip().splitlines()[-1][:160], flush=True)
+        return False
+    return True
+
+
+def critical_pressure():
+    level = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                           capture_output=True, text=True).stdout.strip()
+    return level == "4"
+
+
+def probe(exerciser, window, size, target, rows):
+    """One prompt at this configuration, recorded in the progress file as it goes."""
+    progress(window=window, size=size, target_gb=round(target, 1),
+             phase="sending a prompt of this size")
+    row = measure(exerciser, size, f"calibrate-{window}")
+    row["window"], row["target_gb"] = window, round(target, 1)
+    row["critical_pressure"] = critical_pressure()
+    rows.append(row)
+    progress(rows=[{"window": r["window"], "size": r["size"], "ok": r["ok"],
+                    "ttft_s": r.get("ttft_s"), "error": r.get("error"),
+                    "target_gb": r.get("target_gb")} for r in rows],
+             size=None, phase="between sizes")
+    print(("ok " + (f"{row['ttft_s']:.0f} s to first token" if row["ttft_s"] else ""))
+          if row["ok"] else f"failed ({row['error']})", flush=True)
+    return row
+
+
+def targets_to_try(ram, working_set, args):
+    """Total-memory targets, most generous first.
+
+    The machine decides this, not the model: an explicit --memory-gb goes past auto's
+    own ceiling, so a large machine is measured at what it really has."""
+    if args.memory_gb:
+        return [args.memory_gb]
+    top = min(working_set - 2.0, ram * 0.9)
+    out = []
+    value = top
+    while value >= MIN_TARGET_GB:
+        out.append(round(value, 1))
+        value -= max(2.0, top * 0.12)
+    return out or [MIN_TARGET_GB]
+
+
+def run(args):
+    """Search the configuration space: how much memory, how big a window, in that order.
+
+    Every configuration it tries is a real server start, so it always leaves the machine
+    serving: whatever happens, the last configuration known to work is restored."""
+    try:
+        return search(args)
+    finally:
+        good = LAST_GOOD.get("config")
+        if good and LAST_GOOD.get("dirty"):
+            print(f"restoring the last working configuration: {good[0]:,} at "
+                  + (f"{good[1]:.1f} GB" if good[1] else "auto"), flush=True)
+            restart(*good)
+            ctl("profile", str(good[0]))
+
+
+LAST_GOOD = {"config": None, "dirty": False}
+
+
+def search(args):
+    exerciser = load("exerciser")
+    ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
+    # Try past the qualified envelope too: with the window patch the server accepts it and
+    # the planner refuses what does not fit, so the machine decides rather than a constant.
+    windows = [args.window] if args.window else [262_144, 196_608, 131_072, 98_304, 65_536, 49_152, 32_768, 16_384]
+    fractions = (0.25, 0.5, 0.75) if args.quick else (0.25, 0.5, 0.75, 0.9)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    attempts = []
-    chosen = None
-    progress(started=started, windows=windows, fractions=list(fractions), rows=[],
-             phase="starting", window=None, size=None)
-    for window in windows:
-        print(f"\n=== window {window:,}: restarting the server", flush=True)
-        progress(window=window, phase="restarting the server at this window", size=None)
-        out = ctl("restart", str(window))
-        if out.returncode != 0:
-            print(out.stderr.strip()[-300:], file=sys.stderr)
-            attempts.append({"window": window, "error": "server did not start"})
+    rows, notes = [], []
+    progress(started=started, windows=windows, rows=[], phase="starting", window=None, size=None)
+
+    # 1. How much of this machine can the server actually use? Take the most generous
+    #    target that serves a middling prompt without a memory failure or critical pressure.
+    reference_window = min(32_768, max(windows))
+    target = None
+    for candidate in targets_to_try(ram, working_set, args):
+        print(f"\n=== trying a {candidate:.1f} GB memory target", flush=True)
+        progress(phase=f"trying a {candidate:.1f} GB memory target", target_gb=candidate,
+                 window=reference_window, size=None)
+        if not restart(reference_window, candidate):
+            notes.append(f"{candidate:.1f} GB: server would not start")
             continue
-        rows = []
+        print(f"  {int(reference_window * 0.5):,} tokens…", end=" ", flush=True)
+        row = probe(exerciser, reference_window, int(reference_window * 0.5) // 1000 * 1000, candidate, rows)
+        if row["ok"] and not row["critical_pressure"]:
+            target = candidate
+            print(f"  {candidate:.1f} GB works", flush=True)
+            break
+        notes.append(f"{candidate:.1f} GB: " + (row.get("error") or "the machine went to critical pressure"))
+    if target is None:
+        print("no memory target served a prompt; is the server healthy?", file=sys.stderr)
+        progress(phase="no memory target worked")
+        return 1
+
+    # 2. How large a window does that target carry? Accept the largest window whose
+    #    prompts work up to three quarters of itself.
+    chosen_window, window_rows = None, []
+    for window in windows:
+        if window <= reference_window and any(r["ok"] and r["window"] == reference_window for r in rows) \
+           and window != reference_window:
+            pass
+        print(f"\n=== window {window:,} at {target:.1f} GB", flush=True)
+        progress(phase="testing this window", window=window, target_gb=target, size=None)
+        if not restart(window, target):
+            notes.append(f"window {window:,}: server would not start at {target:.1f} GB")
+            continue
+        here = []
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
             print(f"  {size:,} tokens…", end=" ", flush=True)
-            progress(window=window, size=size, phase="sending a prompt of this size",
-                     size_started=datetime.now(timezone.utc).isoformat(timespec="seconds"))
-            row = measure(exerciser, size, f"calibrate-{window}")
-            rows.append(row)
-            done = (progress_rows() + [{"window": window, "size": size, "ok": row["ok"],
-                                        "ttft_s": row.get("ttft_s"), "error": row.get("error")}])
-            progress(rows=done, size=None, phase="between sizes")
-            print(("ok " + (f"{row['ttft_s']:.0f} s to first token" if row["ttft_s"] else ""))
-                  if row["ok"] else f"failed ({row['error']})", flush=True)
+            row = probe(exerciser, window, size, target, rows)
+            here.append(row)
             if not row["ok"] and row["error"] == "insufficient_memory":
                 break
-        good = [r for r in rows if r["ok"] and r.get("prompt_tokens")]
-        attempts.append({"window": window, "rows": rows})
+        good = [r for r in here if r["ok"] and r.get("prompt_tokens")]
         if good and max(r["prompt_tokens"] for r in good) >= window * 0.7:
-            chosen = {"window": window, "rows": rows}
+            chosen_window, window_rows = window, here
             break
-        print(f"  window {window:,} did not carry prompts to three quarters of itself", flush=True)
+        notes.append(f"window {window:,}: carried only "
+                     + (f"{max((r['prompt_tokens'] or 0) for r in good):,} tokens" if good else "nothing"))
+        if not chosen_window and good:
+            chosen_window, window_rows = window, here   # keep the best so far, keep looking lower
 
-    if chosen is None and attempts:
-        best = max((a for a in attempts if a.get("rows")), default=None,
-                   key=lambda a: max([r["prompt_tokens"] or 0 for r in a["rows"] if r["ok"]] or [0]))
-        chosen = {"window": best["window"], "rows": best["rows"]} if best else None
-
-    if chosen is None:
-        print("no window carried a prompt; is the server healthy?", file=sys.stderr)
-        progress(phase="no window carried a prompt", size=None)
+    if chosen_window is None:
+        print("no window carried a prompt at that target", file=sys.stderr)
+        progress(phase="no window carried a prompt")
         return 1
 
-    good = [r for r in chosen["rows"] if r["ok"] and r.get("prompt_tokens")]
-    failed = [r for r in chosen["rows"] if not r["ok"]]
-    largest = max(r["prompt_tokens"] for r in good) if good else 0
+    # 3. Settle there and keep it: the window in the profile, the target in ctl.env.
+    print(f"\n=== settling on {chosen_window:,} at {target:.1f} GB", flush=True)
+    restart(chosen_window, target)
+    ctl("profile", str(chosen_window))
+    LAST_GOOD["dirty"] = False
+
+    good = [r for r in window_rows if r["ok"] and r.get("prompt_tokens")]
+    failed = [r for r in window_rows if not r["ok"]]
+    largest = max((r["prompt_tokens"] for r in good), default=0)
     ttft = sorted(r["ttft_s"] for r in good if r["ttft_s"])
     decode = sorted(r["decode_tok_s"] for r in good if r["decode_tok_s"])
     prefill = sorted(r["prefill_tok_s"] for r in good if r["prefill_tok_s"])
     result = {
         "measured_at": started, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "window": chosen["window"],
+        "window": chosen_window,
+        "memory_target_gb": target,
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
@@ -264,45 +375,28 @@ def run(args):
         "ttft_at_largest_s": max(good, key=lambda r: r["prompt_tokens"])["ttft_s"] if good else None,
         "prefill_median_tok_s": prefill[len(prefill) // 2] if prefill else None,
         "decode_median_tok_s": decode[len(decode) // 2] if decode else None,
-        "attempts": attempts,
+        "rows": rows, "notes": notes,
         "machine": _machine_description(),
         "ram_percent": os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70"),
     }
-    # Say which wall we hit, because "65,536" means something different on a 24 GB
-    # machine (memory) than on a 64 GB one (the server refuses a larger window).
-    ram, working_set = _machine()
-    ceiling = _ceiling(ram, working_set, float(result["ram_percent"]))
-    if chosen["window"] >= 65_536:
-        result["limited_by"] = "the server's 65,536-token limit, not this machine's memory"
-    elif failed:
-        result["limited_by"] = "memory during long prefills, above the size shown"
-    elif ceiling <= chosen["window"]:
-        result["limited_by"] = "memory: a larger window does not fit in the planned target"
-    else:
-        result["limited_by"] = "the sizes tested; a larger window may still fit"
     result["headline"] = (
         f"up to {result['comfortable_prompt']:,}-token prompts at a {result['window']:,} window"
         + (f", about {result['ttft_median_s']:.0f} s to the first token" if result["ttft_median_s"] else "")
         + (f", {result['decode_median_tok_s']:.1f} tok/s generating" if result["decode_median_tok_s"] else ""))
+    if chosen_window >= 65_536:
+        result["limited_by"] = "the server's 65,536-token limit — the next gain has to come from Slotstream"
+    elif failed:
+        result["limited_by"] = f"memory during long prefills, at a {target:.1f} GB target"
+    else:
+        result["limited_by"] = "the sizes tested"
     os.makedirs(HOME, exist_ok=True)
     tmp = RESULT + ".tmp"
     with open(tmp, "w") as f:
         json.dump(result, f, indent=2)
     os.replace(tmp, RESULT)
-    ctl("profile", str(chosen["window"]))   # keep what we settled on across restarts
     clear_progress()
     show(result)
     return 0
-
-
-def progress_rows():
-    if not os.path.exists(PROGRESS):
-        return []
-    try:
-        with open(PROGRESS) as f:
-            return json.load(f).get("rows", [])
-    except ValueError:
-        return []
 
 
 def _machine():
@@ -340,7 +434,8 @@ def show(result=None):
     print(f"  {result['headline']}")
     print("=" * 72)
     print(f"  machine:        {result.get('machine', '?')}")
-    print(f"  window:         {result['window']:,} tokens")
+    print(f"  window:         {result['window']:,} tokens"
+          + (f" at a {result['memory_target_gb']:.1f} GB memory target" if result.get("memory_target_gb") else ""))
     print(f"  largest prompt: {result['largest_prompt_ok']:,} answered"
           + (f"; {result['first_failure_at']:,} failed" if result.get("first_failure_at") else ""))
     if result.get("ttft_at_largest_s"):
@@ -365,6 +460,8 @@ def main():
     ap.add_argument("--percent", type=float,
                     default=float(os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70")))
     ap.add_argument("--ram", type=float)
+    ap.add_argument("--memory-gb", type=float, dest="memory_gb",
+                    help="skip the memory search and measure at this total target")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--auto", action="store_true",
                     help="run on its own when the answer is missing or stale and you are away")

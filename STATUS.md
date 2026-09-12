@@ -1,7 +1,9 @@
 # Where this project stands
 
-One goal: **find out what this machine can do with this model, say so honestly, and
-work the same way on anyone else's machine.** Everything below is measured on a 24 GB
+One goal: **automatically work out what this model can do on the Mac it is running on,
+and say so.** Not "on this machine, after tuning": on any machine, by itself. Limits in
+Slotstream are work items, and constants we picked earlier are superseded by what
+calibration measures. Everything below is measured on a 24 GB
 M4 Pro unless it says otherwise. Last audit: 2026-09-12.
 
 ## The answer so far
@@ -36,13 +38,15 @@ from SSD; no amount of tuning changes that on this hardware.
    matters.
 2. **The job runner has never completed a real job.** The queue, the yield rules and the
    report are written and exercised; no task has run end to end.
-3. **Long prompts still fail at the prefill-pass wall.** At a 49,152 window with 26
-   experts per layer, prompts of 36K and up are refused for memory while the machine
-   reports normal pressure. Retries resume rather than restart, but they ratchet to
-   about 30K and stall. The likely fix is falling back to a smaller prefill chunk
-   instead of refusing.
-4. **Nothing above 65,536.** Slotstream's own limit; lifting it is one to three weeks of
-   work and only worth it on a machine with more memory.
+3. **Long prompts still fail at the prefill-pass wall**, which breaks the "degrade,
+   never refuse" rule. At a 49,152 window with 26 experts per layer, prompts of 36K and
+   up are refused for memory while the machine reports normal pressure. Retries resume
+   rather than restart, but ratchet to about 30K and stall. The fix is to fall back to a
+   smaller prefill chunk instead of refusing: patch seven.
+4. **Windows above 65,536 are now allowed** (`--beyond-qualified-context`, patch six).
+   The planner prices any window and refuses one that does not fit, so the machine
+   decides. What is still missing is a measurement above 65,536 on a machine with the
+   memory for it.
 5. **The five patches are not upstreamed.** Pull-request text is written in
    `patches/README.md`.
 6. **A fresh machine still needs a person.** `setup.sh` installs and starts services but
