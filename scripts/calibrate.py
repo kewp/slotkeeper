@@ -407,15 +407,29 @@ def run(args):
 
     Every configuration it tries is a real server start, so it always leaves the machine
     serving: whatever happens, the last configuration known to work is restored."""
+    import signal as _signal
+    # An interrupted search must not leave settings that will not load: treat a stop
+    # signal as a normal exit so the restore below always runs.
+    for sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+        _signal.signal(sig, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         return search(args)
+    except KeyboardInterrupt:
+        print("stopped; restoring a working configuration", flush=True)
+        return 130
     finally:
         good = LAST_GOOD.get("config")
         if good and LAST_GOOD.get("dirty"):
             print(f"restoring the last working configuration: {good[0]:,} at "
                   + (f"{good[1]:.1f} GB" if good[1] else "auto"), flush=True)
-            restart(*good)
-            ctl("profile", str(good[0]))
+            if not restart(*good):
+                # Even the last good configuration can fail once memory has moved on;
+                # fall back to settings that always load rather than leaving nothing.
+                print("the last working configuration no longer starts; using defaults", flush=True)
+                restart(32_768, None, None, None, None)
+                ctl("profile", "32768")
+            else:
+                ctl("profile", str(good[0]))
 
 
 LAST_GOOD = {"config": None, "dirty": False}
