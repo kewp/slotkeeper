@@ -120,7 +120,9 @@ def opencode_requests(since):
         if prompt:
             last[key] = (prompt, output)
         err = error_kind(d.get("error"))
-        if not err and not prompt and not output and d.get("finish") in (None, "unknown"):
+        if not err and done is None:
+            err = "in flight"  # still generating: no completion time yet, so it is not a result
+        elif not err and not prompt and not output and d.get("finish") in (None, "unknown"):
             # A step that consumed and produced nothing: on 2026-09-11 OpenCode looped
             # 3,562 of these in three minutes against the server. A failure, not a request.
             err = "empty"
@@ -173,7 +175,7 @@ def grouped_errors(reqs):
     """Consecutive errors of one kind in one session collapse into a single line with a count."""
     out = []
     for r in reqs:
-        if not r["error"]:
+        if not r["error"] or r["error"] == "in flight":
             continue
         stamp = datetime.fromtimestamp(r["ts"] / 1000, timezone.utc).astimezone().isoformat(timespec="seconds")
         if out and out[-1]["session"] == r["session"] and out[-1]["kind"] == r["error"]:
@@ -255,9 +257,11 @@ def main():
 
     oc = report["opencode"]
     if oc:
-        answered = oc["requests"] - sum(oc["errors"].values())
+        inflight = oc["errors"].pop("in flight", 0)
+        answered = oc["requests"] - sum(oc["errors"].values()) - inflight
         print(f"your OpenCode sessions on the local model, last {a.hours:g}h: {answered} answered, {sum(oc['errors'].values())} failed, "
-              f"{oc['sessions']} sessions, model busy {oc['busy_hours']} h")
+              f"{oc['sessions']} sessions, model busy {oc['busy_hours']} h"
+              + (f", {inflight} still generating" if inflight else ""))
         if oc["errors"]:
             print("  failures by kind: " + ", ".join(f"{k} {v}" for k, v in sorted(oc["errors"].items(), key=lambda kv: -kv[1])))
         print(f"  prompt median {oc['prompt_med']} tok (p90 {oc['prompt_p90']}), output median {oc['output_med']} | "
