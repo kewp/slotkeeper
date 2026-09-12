@@ -101,7 +101,7 @@ def jobs_in(folder):
 def find(job_id):
     for folder in (QUEUED, RUNNING, DONE):
         for job in jobs_in(folder):
-            if job["id"] == job_id or job["id"].endswith(job_id):
+            if job_id in (job["id"], job["id"].split("-", 2)[-1]) or job["id"].startswith(job_id) or job["id"].endswith(job_id):
                 return job
     return None
 
