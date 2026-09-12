@@ -205,7 +205,31 @@ def measure(exerciser, size, label):
            "elapsed_s": round(time.monotonic() - t0, 1),
            "error": (result.get("error") or {}).get("code") if isinstance(result.get("error"), dict) else result.get("error")}
     row["ok"] = not row["error"] and bool(result.get("text", "").strip())
+    record(exerciser, row, result)
     return row
+
+
+def record(exerciser, row, result):
+    """Append the probe to the same metrics file the report and the app already read."""
+    try:
+        plan = exerciser.plan_snapshot()
+    except Exception:
+        plan = None
+    line = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "task": row["label"], "label": "calibration", "ok": row["ok"],
+            "note": row.get("error") or "", "prompt_tokens": row.get("prompt_tokens"),
+            "ttft_s": row.get("ttft_s"), "prefill_tok_s": row.get("prefill_tok_s"),
+            "decode_tok_s": row.get("decode_tok_s"), "elapsed_s": row.get("elapsed_s"),
+            "error": result.get("error"), "plan_before": plan,
+            "details": {"window": row.get("window"), "target_gb": row.get("target_gb"),
+                        "requested_tokens": row.get("requested_tokens")}}
+    try:
+        path = os.path.join(HOME, "metrics", "exerciser.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except OSError:
+        pass
 
 
 def set_env(key, value):
@@ -450,6 +474,31 @@ def _ceiling(ram, working_set, percent):
     return int(max(0, min((room / u + 3 * 32_768) / 4 if room > 0 else 0, 65_536)))
 
 
+def live():
+    """What the running measurement has tried and found, for the terminal."""
+    if not os.path.exists(PROGRESS):
+        running = subprocess.run(["pgrep", "-f", "calibrate.py"], capture_output=True, text=True).stdout.split()
+        print("no measurement in progress" + (" (one is starting)" if len(running) > 1 else ""))
+        return show()
+    with open(PROGRESS) as f:
+        p = json.load(f)
+    print(f"measuring since {p.get('started', '?')}, updated {p.get('updated', '?')}")
+    if p.get("target_gb") or p.get("window"):
+        print(f"  now: {p.get('phase', '')}"
+              + (f" — {p['window']:,} window" if p.get("window") else "")
+              + (f" at {p['target_gb']:.1f} GB" if p.get("target_gb") else "")
+              + (f", {p['size']:,} tokens" if p.get("size") else ""))
+    for a in p.get("attempts", []):
+        what = (f"{a['target_gb']:.1f} GB target" if a["kind"] == "memory target"
+                else f"{a['window']:,} window at {a['target_gb']:.1f} GB")
+        print(f"  tried {what}: {a['result']}")
+    for r in p.get("rows", []):
+        mark = "ok  " if r["ok"] else "FAIL"
+        detail = (f"{r['ttft_s']:.0f} s to first token" if r.get("ttft_s") else (r.get("error") or ""))
+        print(f"  {mark} {r['window']:,} window, {r['size']:,} tokens: {detail}")
+    return 0
+
+
 def show(result=None):
     if result is None:
         if not os.path.exists(RESULT):
@@ -490,12 +539,16 @@ def main():
     ap.add_argument("--memory-gb", type=float, dest="memory_gb",
                     help="skip the memory search and measure at this total target")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--progress", action="store_true",
+                    help="what the measurement running right now has found so far")
     ap.add_argument("--auto", action="store_true",
                     help="run on its own when the answer is missing or stale and you are away")
     ap.add_argument("--force", action="store_true", help="calibrate even while OpenCode is active")
     a = ap.parse_args()
     if a.show:
         return show()
+    if a.progress:
+        return live()
     if a.auto:
         return auto(a)
     why = busy()

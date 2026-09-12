@@ -81,6 +81,8 @@ scripts/exerciser.py --sweep auto --label everyday   # TTFT by prompt size, size
 scripts/bench.py --label mytest             # one-off measurement
 scripts/pressure-drill.sh                   # simulated memory pressure during a request (needs sudo)
 scripts/slotkeeper calibrate         # measure what this machine handles, and write the verdict
+scripts/slotkeeper calibrate --progress   # what the measurement running now has found so far
+scripts/slotkeeper calibrate --show  # the last verdict
 scripts/slotkeeper calibrate auto start   # keep that verdict current on its own
 scripts/slotkeeper capacity --window 49152   # what a window costs in memory, from the planner's ledger
 scripts/slotkeeper jobs add ~/myrepo "add tests for X" --auto   # queue an overnight task
