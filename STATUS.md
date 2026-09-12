@@ -3,8 +3,14 @@
 One goal: **automatically work out what this model can do on the Mac it is running on,
 and say so.** Not "on this machine, after tuning": on any machine, by itself. Limits in
 Slotstream are work items, and constants we picked earlier are superseded by what
-calibration measures. Everything below is measured on a 24 GB
-M4 Pro unless it says otherwise. Last audit: 2026-09-12.
+calibration measures. Last audit: 2026-09-12.
+
+> **These are Karl's numbers, not yours.** Every measurement below comes from one
+> 24 GB M4 Pro MacBook running one model. If you have cloned this repo, none of the
+> figures describe your machine — run `slotkeeper calibrate`, which exists precisely so
+> you do not need them. The per-RAM table near the end is arithmetic from the planner's
+> ledger, not measurement, on every row except 24 GB. See "Whose machine these numbers
+> come from" in `CLAUDE.md`.
 
 ## The answer so far
 

@@ -100,6 +100,71 @@ New machine: `scripts/setup.sh` (see README). Script checks: `bash -n scripts/*.
 - Scripts must stay compatible with `/bin/bash` 3.2 (launchd runs them with it): no `mapfile`, no associative arrays. `lsof` exits 1 on no match, so guard pipelines under `pipefail`.
 - Rebuilding Slotstream: `scripts/slotkeeper patch` (extract shipped source, apply `patches/*.patch`, `make checks && make build`, install as a new release, restart; `--build-only` to skip the install; `--status` to see which patches the installed binary has). About 5 minutes. Manual steps are in `patches/README.md`.
 
+## Where the evidence lives
+
+Everything this project claims comes from one of the files below. **Read them before
+estimating anything.** On 2026-09-12 an assistant spent forty minutes reporting "still
+going" on a prefill while `slotstream.log` held the percentage, the rate and an ETA,
+and then proposed a cause that the metrics file had already refuted. Both files were
+sitting there the whole time.
+
+| File | What it is | Use it for |
+| --- | --- | --- |
+| `~/.slotstream/slotstream.log` | The server's own running commentary. Per-pass prefill progress (`prefill: 75520/100369 tokens (75%), ~8.6 min left`), the memory plan at startup, elastic pool moves, every refusal in full. Rotated at 10 MB. | **Anything happening right now.** `tail -f` it during any long request. It is the only place live prefill progress exists. |
+| `~/.slotstream/metrics/<date>.jsonl` | 30-second samples from `monitor.sh`: pressure, free %, swap, disk, battery, and per-server `experts_per_layer`, `pool_gb`, `size_vram_gb`, `rss_mb`, `cpu_percent`, `prefix_hits/misses/evictions/held`. ~1 MB/day. | **Testing any claim about memory.** It is the richest source in the system and answers "did the pool actually shrink?" directly. |
+| `~/.slotstream/metrics/exerciser.jsonl` | Every background task the exerciser ran, with timings and failures. | Trends over days; what breaks unattended. |
+| `~/.slotstream/metrics/opencode.jsonl` | Karl's real OpenCode requests, including real errors. | Ground truth about actual use, as opposed to anything we synthesise. |
+| `~/.slotstream/calibration-attempts.jsonl` | Append-only, every calibration attempt ever: starts with the server's refusal text, probes with tokens, timings and (since 2026-09-12) the prefill decay curve. | The durable measurement record. Survives every run. |
+| `~/.slotstream/calibration.json` | The settled verdict of the **latest successful** run only. Overwritten each run; absent if no run has settled. | The current answer. Never the history. |
+| `~/.slotstream/calibration.progress.json` | Live state of a running search; deleted when it finishes. | `slotkeeper calibrate --progress`. |
+| `~/.slotstream/ctl.env` | Port and knobs every script and the app read. | Current configuration. |
+| `~/.slotstream/ctl.env.unloadable` | The settings from the last configuration that would not start, kept deliberately. | Diagnosing a fallback. |
+| `~/.slotstream/slotkeeper-bar.log` | Menu-bar app stdout. **Currently 13.8 MB of `AttributeGraph: cycle detected` — a SwiftUI dependency cycle, logged continuously, never rotated.** | Nothing useful yet. Fix the cycle and add rotation. |
+| `~/.slotstream/baselines/` | Snapshots taken before a change: attempts log, ctl.env, binary sha256, patch status. | Before/after comparison, since `calibration.json` is overwritten. |
+
+How this changes what we do:
+
+- **Never report progress on a long request from an estimate.** The log has the real
+  number. An average rate is not progress.
+- **Never publish a cause without checking `metrics/<date>.jsonl` first.** It is the
+  cheapest falsification available and it has already killed one confident hypothesis.
+- **Never run heavy disk work while a measurement is in flight.** This model streams
+  67.9 GB of experts from SSD. A `du` over the model directory, a `shasum` of a release
+  binary or a recursive tree diff competes directly with prefill and will show up as a
+  slowdown you then misattribute to the machine. A Swift build also flushes the page
+  cache, which can leave too little reclaimable memory to restart at a large window.
+- **One averaged number per request throws away the measurement.** Prefer the curve.
+  `calibrate.py` now records `prefill_curve` and `prefill_decay` per probe.
+- **`prefix_hits` has been 0 across every server instance.** Calibration only sends
+  one-shot prompts, so prefix retention has never been exercised by our own tests. The
+  "98-99% reuse" figure comes from Karl's OpenCode sessions, not from anything we run.
+
+## Whose machine these numbers come from
+
+**Almost every number in this repo was measured on Karl's 24 GB M4 Pro MacBook, and
+most of them do not transfer.** If you have cloned this repo and pointed an assistant
+at it, treat the following as *examples of what measurement produced here*, not as
+facts about your machine:
+
+- Anything in `STATUS.md` under "The answer so far", "Where the memory actually goes"
+  and "The honest limits, with numbers" — including the 131,072 window carrying 100,369
+  tokens, the 18.6 GB memory target, ~3 tok/s generation, and the prefill decay curve.
+  All of it is this Mac, on 2026-09-12, with this model.
+- Every row in `~/.slotstream/metrics/`, `calibration-attempts.jsonl` and
+  `~/.slotstream/baselines/` — these are machine state, not shared results.
+- The per-RAM table in `STATUS.md` is **arithmetic from the planner's ledger**, not
+  measurement, on every row except the 24 GB one.
+
+What does transfer: the patches in `patches/` (they target Slotstream 0.2.14 source),
+the scripts, the ladder and search strategy in `calibrate.py`, the constraint taxonomy
+in `CONSTRAINTS.md` (searched / patched / physics), and the rule that a refusal is a
+symptom rather than an explanation.
+
+**The point of `slotkeeper calibrate` is that you do not need Karl's numbers.** Run it
+and it measures your machine, writes `~/.slotstream/calibration.json`, and sets the
+profile to what your hardware actually carries. Anything it writes is about you;
+anything checked into git is about this Mac unless it says otherwise.
+
 ## Deployment
 
 OpenCode loads `~/.config/opencode/plugins/model-stats.ts`. On this machine that file is a re-export shim pointing at this repo by absolute path, so edits here take effect on the next OpenCode restart. A running OpenCode keeps the old code until restarted. The README documents a plain copy as the alternative install.

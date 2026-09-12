@@ -1,5 +1,10 @@
 # Slotkeeper
 
+> **Numbers in this repo were measured on one 24 GB M4 Pro.** They are examples of what
+> measurement produced on that machine, not claims about yours. `slotkeeper calibrate`
+> measures your machine and writes `~/.slotstream/calibration.json`; the live evidence
+> files it reads are catalogued under "Where the evidence lives" in `CLAUDE.md`.
+
 Keep a local LLM running on a MacBook, keep the Mac usable, and see what the
 model is doing. Built around [Slotstream](https://github.com/carloslfu/slotstream) serving
 Qwen3.8-Flash-Next on Apple Silicon and [OpenCode](https://opencode.ai) as
