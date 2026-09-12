@@ -249,18 +249,40 @@ def set_env(key, value):
         os.environ[key] = str(value)
 
 
-def restart(window, target_gb):
-    """Bring the server up at one configuration. False when it will not start there."""
+def server_refusal():
+    """What the server actually said when it declined to start."""
+    log = os.path.join(HOME, "slotstream.log")
+    try:
+        with open(log, errors="replace") as f:
+            f.seek(max(0, os.path.getsize(log) - 20_000))
+            lines = [l.strip() for l in f if "Error:" in l or "insufficient" in l]
+    except OSError:
+        return None
+    return lines[-1].replace("Error: ", "")[:200] if lines else None
+
+
+def restart(window, target_gb, retention=None):
+    """Bring the server up at one configuration. False when it will not start there.
+
+    `retention` is how much conversation the server may keep: "full", a token count,
+    or None for the server's own default. It is a dimension of the search, not a
+    setting we inherit: a large window with a full conversation reserved can fail to
+    start where the same window with less retention runs fine."""
     set_env("SLOTSTREAM_MEMORY_GB", f"{target_gb:.1f}" if target_gb else None)
+    set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention)
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
-        LAST_GOOD["config"] = (window, target_gb)
-    if out.returncode != 0:
-        print(f"    server would not start at {target_gb:.1f} GB / {window:,}: "
-              + (out.stderr or out.stdout).strip().splitlines()[-1][:160], flush=True)
-        return False
-    return True
+        LAST_GOOD["config"] = (window, target_gb, retention)
+        return True
+    why = server_refusal() or (out.stderr or out.stdout).strip().splitlines()[-1][:160]
+    print(f"    would not start at {target_gb:.1f} GB / {window:,} "
+          f"(keeping {retention or 'the default'}): {why}", flush=True)
+    RESTART_REASON["why"] = why
+    return False
+
+
+RESTART_REASON = {"why": None}
 
 
 def critical_pressure():
@@ -335,12 +357,16 @@ def search(args):
     # 1. How much of this machine can the server actually use? Take the most generous
     #    target that serves a middling prompt without a memory failure or critical pressure.
     reference_window = min(32_768, max(windows))
+    # How much conversation to keep, most generous first. A window that will not start
+    # with the whole conversation kept often starts with less, and keeping less costs
+    # one re-prefill rather than the window itself.
+    retentions = ["full", "32768", None]
     target = None
     for candidate in targets_to_try(ram, working_set, args):
         print(f"\n=== trying a {candidate:.1f} GB memory target", flush=True)
         progress(phase=f"trying a {candidate:.1f} GB memory target", target_gb=candidate,
                  window=reference_window, size=None)
-        if not restart(reference_window, candidate):
+        if not restart(reference_window, candidate, retentions[0]):
             notes.append(f"{candidate:.1f} GB: server would not start")
             note_attempt(kind="memory target", target_gb=candidate, window=reference_window,
                          result="too much for this machine: the server would not start")
@@ -363,18 +389,26 @@ def search(args):
 
     # 2. How large a window does that target carry? Accept the largest window whose
     #    prompts work up to three quarters of itself.
-    chosen_window, window_rows = None, []
+    chosen_window, window_rows, chosen_retention = None, [], retentions[0]
     for window in windows:
         if window <= reference_window and any(r["ok"] and r["window"] == reference_window for r in rows) \
            and window != reference_window:
             pass
         print(f"\n=== window {window:,} at {target:.1f} GB", flush=True)
         progress(phase="testing this window", window=window, target_gb=target, size=None)
-        if not restart(window, target):
-            notes.append(f"window {window:,}: server would not start at {target:.1f} GB")
+        # Give up retention before giving up the window: the window is what the user gets.
+        started_here = None
+        for retention in retentions:
+            if restart(window, target, retention):
+                started_here = retention
+                break
             note_attempt(kind="window", window=window, target_gb=target,
-                         result="does not fit in this memory target")
+                         result=f"keeping {retention or 'the default'}: " + (RESTART_REASON["why"] or "would not start"))
+        if started_here is None:
+            notes.append(f"window {window:,}: no retention setting would start at {target:.1f} GB")
             continue
+        if started_here != retentions[0]:
+            print(f"  started by keeping {started_here or 'the default'} instead of the whole conversation", flush=True)
         here = []
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
@@ -389,12 +423,13 @@ def search(args):
                      result=(f"carried {largest_here:,} tokens" if largest_here else "carried nothing")
                             + (" — accepted" if largest_here >= window * 0.7 else ""))
         if good and largest_here >= window * 0.7:
-            chosen_window, window_rows = window, here
+            chosen_window, window_rows, chosen_retention = window, here, started_here
             break
         notes.append(f"window {window:,}: carried only "
                      + (f"{max((r['prompt_tokens'] or 0) for r in good):,} tokens" if good else "nothing"))
         if not chosen_window and good:
-            chosen_window, window_rows = window, here   # keep the best so far, keep looking lower
+            # keep the best so far, and keep looking lower
+            chosen_window, window_rows, chosen_retention = window, here, started_here
 
     if chosen_window is None:
         print("no window carried a prompt at that target", file=sys.stderr)
@@ -403,7 +438,7 @@ def search(args):
 
     # 3. Settle there and keep it: the window in the profile, the target in ctl.env.
     print(f"\n=== settling on {chosen_window:,} at {target:.1f} GB", flush=True)
-    restart(chosen_window, target)
+    restart(chosen_window, target, chosen_retention)
     ctl("profile", str(chosen_window))
     # The measured target supersedes any share we picked by hand earlier.
     set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
@@ -419,6 +454,7 @@ def search(args):
         "measured_at": started, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "window": chosen_window,
         "memory_target_gb": target,
+        "retention": chosen_retention or "the server's default",
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
@@ -512,6 +548,8 @@ def show(result=None):
     print(f"  machine:        {result.get('machine', '?')}")
     print(f"  window:         {result['window']:,} tokens"
           + (f" at a {result['memory_target_gb']:.1f} GB memory target" if result.get("memory_target_gb") else ""))
+    if result.get("retention"):
+        print(f"  keeping:        {result['retention']} of the conversation between turns")
     print(f"  largest prompt: {result['largest_prompt_ok']:,} answered"
           + (f"; {result['first_failure_at']:,} failed" if result.get("first_failure_at") else ""))
     if result.get("ttft_at_largest_s"):
