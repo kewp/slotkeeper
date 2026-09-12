@@ -46,7 +46,7 @@ diff -ruN a/Sources/Slotstream/Generate.swift b/Sources/Slotstream/Generate.swif
              stats.terminalMoERowsSkipped = model.terminalMoERowsSkipped - terminalMoEStart
 diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swift
 --- a/Sources/Slotstream/Governor.swift	2026-09-11 21:53:59
-+++ b/Sources/Slotstream/Governor.swift	2026-09-12 08:34:31
++++ b/Sources/Slotstream/Governor.swift	2026-09-12 08:37:00
 @@ -109,6 +109,28 @@
      /// with a pressure interruption both times.
      public static let pressureMemory: TimeInterval = 1200
@@ -76,7 +76,33 @@ diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swif
      /// The ceiling to remember after an event with `live` slots in the pool:
      /// the lower of that and a still-remembered earlier ceiling, so repeated
      /// events ratchet it down rather than resetting it upwards.
-@@ -377,8 +399,10 @@
+@@ -135,6 +157,25 @@
+     /// footprint again when deriving slots, so without this credit the steady
+     /// state under contention double-reserves ~4 GB).
+     public static func desiredPlan(_ i: Inputs) -> MemoryPlan? {
++        if let plan = feasiblePlan(i) { return plan }
++        // Retention is a comfort, not a requirement. Rather than refuse every
++        // request because the window plus a full held conversation no longer
++        // fits what other apps left us, give the conversation back and keep
++        // serving: one re-prefill beats an unusable server. Measured
++        // 2026-09-12, a real session died with "the configured context no
++        // longer fits current availability" while the machine reported normal
++        // pressure and 54% free.
++        guard let policy = i.runtimeAllocationPolicy, policy.prefixCacheEnabled,
++              let without = try? RuntimeAllocationPolicy(
++                prefillChunkOverride: policy.prefillChunkOverride, prefixCacheEnabled: false)
++        else { return nil }
++        var shed = i
++        shed.runtimeAllocationPolicy = without
++        return feasiblePlan(shed)
++    }
++
++    /// One feasibility attempt against the memory a restart would have.
++    private static func feasiblePlan(_ i: Inputs) -> MemoryPlan? {
+         let credited = i.availableGB + Geometry.gb(i.currentSlots) + Planner.fixedFootprintGB
+             + (i.mtpEnabled ? Planner.mtpResidentGB : 0)
+             + (i.visionResidentReserved ? Planner.visionResidentGB : 0)
+@@ -377,8 +418,10 @@
                  ? RequestFailure(.insufficientMemory, "the configured context no longer fits current availability; \(RequestFailure.safeRetryAdvice)") : nil)
              if pressure != nil {
                  // Even at the arena floor there can be inexpensive memory to
@@ -89,7 +115,7 @@ diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swif
                  MLX.Memory.clearCache()
              }
              if case let .resize(slots, reason) = GovernorPolicy.decide(i) {
-@@ -386,7 +410,7 @@
+@@ -386,7 +429,7 @@
                  self.apply(
                      slots, plan: self.engine.currentPlan, reason: reason,
                      prefillChunk: controls.prefillChunk,
@@ -98,7 +124,7 @@ diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swif
              }
          }
          // Request cancellation observes pressure independently of optimization controls.
-@@ -405,7 +429,7 @@
+@@ -405,7 +448,7 @@
  
      private func apply(
          _ slots: Int, plan: MemoryPlan?, reason: String,
@@ -107,7 +133,7 @@ diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swif
      ) {
          let target = slots  // already clamped by GovernorPolicy.decide
          let before = engine.model.pool.slots
-@@ -422,7 +446,10 @@
+@@ -422,7 +465,10 @@
              // ~0.9 GB, recovered by one re-prefill on the next turn — so it
              // goes before the pool is starved further. Growing keeps it: the
              // machine has room and the next turn should still be fast.
@@ -198,8 +224,8 @@ diff -ruN a/Sources/Slotstream/RequestControl.swift b/Sources/Slotstream/Request
              if failureValue == nil { failureValue = error }
 diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift
 --- a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-11 21:53:59
-+++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-12 08:34:31
-@@ -191,6 +191,21 @@
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-12 08:38:10
+@@ -191,6 +191,44 @@
              P.pressureCeiling(previous: 800, secondsSincePrevious: 60, live: 900), 800)
          c.equal("ceiling: a stale ceiling is replaced",
              P.pressureCeiling(previous: 800, secondsSincePrevious: P.pressureMemory + 1, live: 900), 900)
@@ -215,6 +241,29 @@ diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/S
 +            !P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: Geometry.floorSlots, pressure: .warning))
 +        c.expect("a critical event takes everything, whatever is held",
 +            P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: steady, pressure: .critical))
++        // A window that no longer fits with a full held conversation must shed the
++        // conversation and keep serving, not refuse every request.
++        guard let retained = try? RuntimeAllocationPolicy(prefixCacheTokens: 65_536) else {
++            c.expect("fixture: a retention policy can be built", false)
++            return c.report()
++        }
++        var tight = inputs(slots: Geometry.floorSlots, avail: 3.0)
++        tight.maxContextTokens = 65_536
++        tight.contextQualification = true
++        tight.runtimeAllocationPolicy = retained
++        if let plan = P.desiredPlan(tight) {
++            c.equal("an infeasible window sheds retention instead of refusing", plan.prefixCacheTokens, 0)
++        } else {
++            var roomy = tight
++            roomy.availableGB = 30
++            c.expect("fixture: the same inputs fit when memory is there", P.desiredPlan(roomy) != nil, "no plan at 30 GB either")
++        }
++        var plenty = inputs(slots: steady, avail: steadyAvail)
++        plenty.runtimeAllocationPolicy = retained
++        if let plan = P.desiredPlan(plenty) {
++            c.expect("retention is kept while it fits", plan.prefixCacheTokens > 0)
++        }
++
 +        c.expect("the protected size is the boundary",
 +            P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens, targetSlots: steady)
 +                && !P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens + 1, targetSlots: steady))
