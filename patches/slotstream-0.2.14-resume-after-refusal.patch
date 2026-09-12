@@ -46,8 +46,8 @@ diff -ruN a/Sources/Slotstream/Generate.swift b/Sources/Slotstream/Generate.swif
              stats.terminalMoERowsSkipped = model.terminalMoERowsSkipped - terminalMoEStart
 diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swift
 --- a/Sources/Slotstream/Governor.swift	2026-09-11 21:53:59
-+++ b/Sources/Slotstream/Governor.swift	2026-09-12 00:32:17
-@@ -109,6 +109,20 @@
++++ b/Sources/Slotstream/Governor.swift	2026-09-12 08:34:31
+@@ -109,6 +109,28 @@
      /// with a pressure interruption both times.
      public static let pressureMemory: TimeInterval = 1200
  
@@ -56,25 +56,64 @@ diff -ruN a/Sources/Slotstream/Governor.swift b/Sources/Slotstream/Governor.swif
 +    /// Retention used to go first on every shrink, because ~0.9 GB bought back
 +    /// one re-prefill of a short turn. At a long window that trade inverts: a
 +    /// 48K prefix costs 16 minutes to rebuild (measured 2026-09-11), while the
-+    /// expert pool it would protect refills from SSD as requests run. So drop
-+    /// it only when little is held, or when the pool is already at the floor
-+    /// and there is nothing else left to give.
++    /// expert pool it would protect refills from SSD as requests run.
++    ///
++    /// Reaching the floor is not itself a reason to drop it. Measured
++    /// 2026-09-12 on a real coding session: an ordinary warning shrank the pool
++    /// to the floor, the held 24K conversation went with it, and the next turn
++    /// re-read the whole prompt and took 11 minutes instead of 40 seconds. The
++    /// prefix was under a gigabyte. Only a critical event, where the machine
++    /// really is out of memory, is worth that price.
 +    public static let protectedHeldTokens = 8192
 +
-+    public static func shouldDropRetainedPrefix(heldTokens: Int, targetSlots: Int) -> Bool {
-+        heldTokens <= protectedHeldTokens || targetSlots <= Geometry.floorSlots
++    public static func shouldDropRetainedPrefix(
++        heldTokens: Int, targetSlots: Int, pressure: Pressure? = nil
++    ) -> Bool {
++        if pressure == .critical { return true }
++        return heldTokens <= protectedHeldTokens
 +    }
 +
      /// The ceiling to remember after an event with `live` slots in the pool:
      /// the lower of that and a still-remembered earlier ceiling, so repeated
      /// events ratchet it down rather than resetting it upwards.
-@@ -422,7 +436,10 @@
+@@ -377,8 +399,10 @@
+                 ? RequestFailure(.insufficientMemory, "the configured context no longer fits current availability; \(RequestFailure.safeRetryAdvice)") : nil)
+             if pressure != nil {
+                 // Even at the arena floor there can be inexpensive memory to
+-                // return. No live reader exists while this gate is held.
+-                self.engine.prefixCache.drop()
++                // return. No live reader exists while this gate is held. A
++                // warning takes back the transients; only a critical event is
++                // worth the minutes of prefill a held conversation represents.
++                if pressure == .critical { self.engine.prefixCache.drop() }
+                 MLX.Memory.clearCache()
+             }
+             if case let .resize(slots, reason) = GovernorPolicy.decide(i) {
+@@ -386,7 +410,7 @@
+                 self.apply(
+                     slots, plan: self.engine.currentPlan, reason: reason,
+                     prefillChunk: controls.prefillChunk,
+-                    prefixCacheTokens: controls.prefixCacheTokens)
++                    prefixCacheTokens: controls.prefixCacheTokens, shedPressure: pressure)
+             }
+         }
+         // Request cancellation observes pressure independently of optimization controls.
+@@ -405,7 +429,7 @@
+ 
+     private func apply(
+         _ slots: Int, plan: MemoryPlan?, reason: String,
+-        prefillChunk: Int, prefixCacheTokens: Int
++        prefillChunk: Int, prefixCacheTokens: Int, shedPressure: GovernorPolicy.Pressure? = nil
+     ) {
+         let target = slots  // already clamped by GovernorPolicy.decide
+         let before = engine.model.pool.slots
+@@ -422,7 +446,10 @@
              // ~0.9 GB, recovered by one re-prefill on the next turn — so it
              // goes before the pool is starved further. Growing keeps it: the
              // machine has room and the next turn should still be fast.
 -            if !growing { engine.prefixCache.drop() }
 +            if !growing, GovernorPolicy.shouldDropRetainedPrefix(
-+                heldTokens: engine.prefixCache.heldTokens, targetSlots: target) {
++                heldTokens: engine.prefixCache.heldTokens, targetSlots: target, pressure: shedPressure) {
 +                engine.prefixCache.drop()
 +            }
              engine.model.pool.resize(to: target)
@@ -159,8 +198,8 @@ diff -ruN a/Sources/Slotstream/RequestControl.swift b/Sources/Slotstream/Request
              if failureValue == nil { failureValue = error }
 diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift
 --- a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-11 21:53:59
-+++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-12 00:32:17
-@@ -191,6 +191,17 @@
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift	2026-09-12 08:34:31
+@@ -191,6 +191,21 @@
              P.pressureCeiling(previous: 800, secondsSincePrevious: 60, live: 900), 800)
          c.equal("ceiling: a stale ceiling is replaced",
              P.pressureCeiling(previous: 800, secondsSincePrevious: P.pressureMemory + 1, live: 900), 900)
@@ -170,8 +209,12 @@ diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/S
 +            P.shouldDropRetainedPrefix(heldTokens: 1024, targetSlots: steady))
 +        c.expect("long retained prefix survives a shrink that still has pool to give",
 +            !P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: steady))
-+        c.expect("at the floor there is nothing else to give, so it goes",
-+            P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: Geometry.floorSlots))
++        c.expect("long retained prefix survives a shrink all the way to the floor",
++            !P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: Geometry.floorSlots))
++        c.expect("a warning at the floor still keeps it",
++            !P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: Geometry.floorSlots, pressure: .warning))
++        c.expect("a critical event takes everything, whatever is held",
++            P.shouldDropRetainedPrefix(heldTokens: 48_000, targetSlots: steady, pressure: .critical))
 +        c.expect("the protected size is the boundary",
 +            P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens, targetSlots: steady)
 +                && !P.shouldDropRetainedPrefix(heldTokens: P.protectedHeldTokens + 1, targetSlots: steady))

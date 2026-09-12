@@ -119,7 +119,9 @@ def opencode_requests(since):
             select m.id, m.session_id, m.data,
               (select min(coalesce(json_extract(p.data,'$.time.start'), json_extract(p.data,'$.state.time.start')))
                  from part p where p.message_id = m.id
-                  and json_extract(p.data,'$.type') in ('text','reasoning','tool'))
+                  and json_extract(p.data,'$.type') in ('text','reasoning','tool')),
+              (select group_concat(coalesce(json_extract(p.data,'$.tool'), json_extract(p.data,'$.type')))
+                 from part p where p.message_id = m.id and json_extract(p.data,'$.type') = 'tool')
             from message m
             where m.time_created >= ? and json_extract(m.data,'$.providerID') = ?
               and json_extract(m.data,'$.role') = 'assistant'
@@ -129,7 +131,7 @@ def opencode_requests(since):
         return []
     plugin = {r.get("messageID"): r for r in rows_of(os.path.join(M, "opencode.jsonl"))}
     out, last = [], {}
-    for mid, sid, data, first in rows:
+    for mid, sid, data, first, tools in rows:
         d = json.loads(data)
         t = d.get("time") or {}
         tok = d.get("tokens") or {}
@@ -158,6 +160,8 @@ def opencode_requests(since):
                "ttft_s": ttft, "decode_tok_s": (round(output / decode_s, 2)
                                                 if decode_s and decode_s >= 2 and output >= 16 else None),
                "total_s": (done - created) / 1000 if done and created else None, "error": err, "followup": followup,
+               "decode_s": round(decode_s, 1) if decode_s else None,
+               "tools": sorted(set((tools or "").split(","))) if tools else [],
                "cwd": (d.get("path") or {}).get("cwd")}
         extra = plugin.get(mid)
         if extra:

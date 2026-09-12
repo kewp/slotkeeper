@@ -23,6 +23,7 @@ struct DashboardView: View {
     @State private var stuckPressureNote = ""
     @State private var liveWasActive = false
     @State private var liveExpanded = false
+    @State private var selectedRequest: OpenCodeRequest.ID?
     @State private var hours = 24.0
 
     var body: some View {
@@ -305,7 +306,15 @@ struct DashboardView: View {
                     }
                     .chartXAxisLabel("prompt tokens").chartYAxisLabel("seconds")
                     .frame(height: 170)
-                    Table(requests.suffix(80).reversed()) {
+                    Chart(requests.suffix(40).filter { $0.ttft != nil }) { r in
+                        BarMark(x: .value("turn", r.ts), y: .value("seconds", r.ttft ?? 0))
+                            .foregroundStyle(by: .value("phase", "waiting for first token"))
+                        BarMark(x: .value("turn", r.ts), y: .value("seconds", r.decodeSeconds ?? 0))
+                            .foregroundStyle(by: .value("phase", "generating"))
+                    }
+                    .chartYAxisLabel("seconds")
+                    .frame(height: 150)
+                    Table(requests.suffix(80).reversed(), selection: $selectedRequest) {
                         TableColumn("time") { Text($0.ts.formatted(date: .omitted, time: .shortened)) }.width(70)
                         TableColumn("project") { Text($0.project) }.width(110)
                         TableColumn("prompt") { Text($0.prompt.map { "\($0)" } ?? "–") }.width(60)
@@ -321,6 +330,16 @@ struct DashboardView: View {
                         }
                     }
                     .frame(minHeight: 220)
+                    if let turn = requests.first(where: { $0.id == selectedRequest }) {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(turn.ts.formatted(date: .omitted, time: .standard) + " · " + turn.project
+                                + (turn.agent.isEmpty ? "" : " · " + turn.agent)).font(.callout).bold()
+                            ForEach(turn.detailLines, id: \.self) { Text($0).font(.caption) }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("select a turn to see what it read, reused and called").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -663,7 +682,10 @@ struct DashboardView: View {
                 cwd: o["cwd"] as? String, prompt: o["prompt"] as? Int, output: o["output"] as? Int,
                 ttft: o["ttft_s"] as? Double, decode: o["decode_tok_s"] as? Double,
                 error: o["error"] as? String, followup: o["followup"] as? Bool ?? false,
-                cacheHitRate: o["cache_hit_rate"] as? Double)
+                cacheHitRate: o["cache_hit_rate"] as? Double,
+                cachedTokens: o["cached_tokens"] as? Int, promptDelta: o["prompt_delta"] as? Int,
+                decodeSeconds: o["decode_s"] as? Double, totalSeconds: o["total_s"] as? Double,
+                tools: o["tools"] as? [String] ?? [], expertsPerLayer: o["experts_per_layer"] as? Int)
         }.sorted { $0.ts < $1.ts }
     }
 
@@ -699,6 +721,36 @@ struct OpenCodeRequest: Identifiable {
     var followup: Bool
     /// What the server said it reused of this prompt, when the plugin recorded the turn.
     var cacheHitRate: Double?
+    var cachedTokens: Int?
+    var promptDelta: Int?
+    var decodeSeconds: Double?
+    var totalSeconds: Double?
+    var tools: [String] = []
+    var expertsPerLayer: Int?
+
+    /// The story of one turn, in the order you would ask about it.
+    var detailLines: [String] {
+        var out: [String] = []
+        if let p = prompt {
+            var line = "prompt \(p.formatted()) tokens"
+            if let cached = cachedTokens { line += ", \(cached.formatted()) reused from the held conversation" }
+            if let delta = promptDelta { line += ", \(delta.formatted()) new since the last turn" }
+            out.append(line)
+        }
+        if let t = ttft {
+            var line = String(format: "waited %.0f s for the first token", t)
+            if let d = decodeSeconds { line += String(format: ", generated for %.0f s", d) }
+            if let total = totalSeconds { line += String(format: ", %.0f s in total", total) }
+            out.append(line)
+        }
+        if let o = output, o > 0 {
+            out.append("\(o) output tokens" + (decode.map { String(format: " at %.1f tok/s", $0) } ?? ""))
+        }
+        if !tools.isEmpty { out.append("called: " + tools.joined(separator: ", ")) }
+        if let e = expertsPerLayer { out.append("expert cache \(e)/layer at the time") }
+        if let err = error { out.append("status: " + err) }
+        return out
+    }
     var reuseText: String { cacheHitRate.map { String(format: "%.0f%%", $0) } ?? "–" }
     var reuseColour: Color {
         guard let rate = cacheHitRate else { return .secondary }

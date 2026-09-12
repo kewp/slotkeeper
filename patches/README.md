@@ -13,7 +13,7 @@ checks included.
 | `slotstream-0.2.14-opencode-retry.patch` | Pre-output memory-pressure failures say `try your request again`, which OpenCode's retry classifier recognises; post-output failures keep the non-retryable wording so a replay cannot duplicate text or tool effects. Non-cancellation request failures are logged to stderr. | assertions added to `context-serving` (queued-pressure and governor-unavailable pre-output paths) |
 | `slotstream-0.2.14-prefix-retention.patch` | `serve --prefix-cache-tokens <n\|full>` (or `SLOTSTREAM_PREFIX_CACHE_TOKENS`) sets how much conversation state the prefix cache may retain. The planner caps it at the context window, charges it against the expert pool before sizing experts, refuses at startup if the pool would fall below its floor, and reports it in `/api/show` as `runtime_prefix_cache_tokens`. The governor keeps the explicit ceiling across resizes. | assertions added to `prefix-client-capacity` (window cap, pool charge, peak unchanged, `--no-prefix-cache` precedence, invalid values, governor shed, refusal at the floor) |
 | `slotstream-0.2.14-pressure-ceiling.patch` | After an OS pressure event the elastic governor remembers the pool that met it, and for 20 minutes will not regrow past 1 GB below it. Repeated events ratchet the ceiling down; an availability shrink is never blocked; the ceiling is forgotten after the window. | assertions added to `governor-check` (regrowth capped, reason string, cooldown still applies, forgotten after the window, no effect when above the replan, dead-band respected, shrink unaffected, ratchet) |
-| `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. The engine's memory-failure teardown then frees the other conversations but keeps that one (`dropAllButLatest`), instead of dropping everything. Execution errors still keep nothing. A governor shrink no longer drops a large retained prefix before it sheds the expert pool. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state, what survives a memory failure) and `governor-check` (drop order at and above the floor) |
+| `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. The engine's memory-failure teardown then frees the other conversations but keeps that one (`dropAllButLatest`), instead of dropping everything. Execution errors still keep nothing. A governor shrink keeps a large retained prefix: reaching the pool floor is no longer a reason to drop it, and only a critical pressure event is. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state, what survives a memory failure) and `governor-check` (kept above the protected size, kept at the floor, kept under a warning, dropped on critical) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
 
 ## Apply and build
@@ -236,7 +236,20 @@ refills from SSD as requests run.
 > memory failure) and `governor-check` (drop order at, above and at the
 > boundary of the protected size).
 
+**Why the floor stopped being a reason to drop.** Measured on a real coding
+session, 2026-09-12: an ordinary warning shrank the pool to its floor, the held
+24K conversation went with it, and the next turn re-read the whole prompt and
+took 11 minutes instead of the 40 seconds its neighbours took. The prefix was
+under a gigabyte. A warning wants the transients back, not the minutes of
+prefill a conversation represents; a critical event still takes everything.
+
 ## Status
+
+2026-09-12 08:40: the fifth patch has an unbuilt change on top of the installed
+build (keep the prefix at the pool floor, drop it only on critical pressure).
+It is in `patches/` and applies to stock 0.2.14 with the others, but has not
+been compiled or installed, because a real OpenCode session had the machine.
+Next: `scripts/slotkeeper patch` when the session ends.
 
 2026-09-12 03:17: all five patches installed as release
 `slotstream-0.2.14-local-20260912030119`, on the deep (65,536) profile, with

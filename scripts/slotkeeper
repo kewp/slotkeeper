@@ -465,5 +465,6 @@ case "${1:-}" in
   monitor) cmd_monitor "${2:-status}" ;;
   jobs) cmd_jobs "${@:2}" ;;
   exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  -h|--help|help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
