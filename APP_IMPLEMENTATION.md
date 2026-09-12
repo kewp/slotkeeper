@@ -212,9 +212,12 @@ and B. Never import MLX or Slotstream into the app.
 
 ### A1. Requests table (est. 1 day)
 
-Done 2026-09-12: `DashboardView.yourRequests` shows counts, a TTFT-by-prompt
-chart coloured by cold versus follow-up, the follow-up/cold median comparison,
-and a table of the last 80 requests. It shells out to
+Done 2026-09-12: the dashboard is three tabs — Your work, Jobs, System.
+`DashboardView.yourRequests` shows counts, a TTFT-by-prompt chart coloured by
+cold versus follow-up, the follow-up/cold median comparison, and a table of the
+last 80 requests. The Jobs tab queues a task (repo, text, `--auto`), lists every
+job with state, elapsed, files changed and a link to its log, and the menu bar
+carries a jobs section with pause/resume and daemon install. It shells out to
 `scripts/report.py --requests --json --hours N` (resolved next to
 `SLOTSTREAM_CTL`) and never opens the database itself. Remaining in A1: filters,
 click-through to a single request, and joining the plugin's exact TTFT.

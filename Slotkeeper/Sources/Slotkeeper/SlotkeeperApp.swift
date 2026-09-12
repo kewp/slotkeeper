@@ -58,6 +58,15 @@ struct StatusMenu: View {
             Text("No request in flight").font(.headline)
         }
         Divider()
+        Text(status.jobsHeadline).font(.headline)
+        if status.jobs.queued > 0 || status.jobs.running != nil {
+            ForEach(status.jobs.lines, id: \.self) { Text($0).font(.caption) }
+        }
+        Button(status.jobs.pauseFlag == nil ? "Pause Job Runner" : "Resume Job Runner") { status.toggleJobsPause() }
+        if !status.jobs.daemonInstalled {
+            Button("Run Jobs Overnight…") { status.run("jobs", "daemon", "start") }
+        }
+        Divider()
         Text(status.exerciserHeadline).font(.headline)
         if status.exerciser.installed {
             Text(status.exerciserSummary)
@@ -280,6 +289,71 @@ final class StatusModel: ObservableObject {
 
     // MARK: exerciser
 
+    /// The overnight job queue, read from the same files scripts/jobs.py writes.
+    struct JobsState {
+        var daemonInstalled = false
+        var pauseFlag: String?
+        var queued = 0
+        var running: String?
+        var lastResults: [String] = []
+        var lines: [String] {
+            var out: [String] = []
+            if let r = running { out.append("running: " + r) }
+            if queued > 0 { out.append("\(queued) queued") }
+            return out + lastResults.prefix(2)
+        }
+    }
+
+    @Published var jobs = JobsState()
+
+    var jobsHeadline: String {
+        if let flag = jobs.pauseFlag { return "Jobs paused: \(flag)" }
+        if jobs.running != nil { return "Job running" }
+        if jobs.queued > 0 { return jobs.daemonInstalled ? "\(jobs.queued) jobs waiting for the night window" : "\(jobs.queued) jobs queued (runner not installed)" }
+        return jobs.daemonInstalled ? "No jobs queued" : "Job runner not installed"
+    }
+
+    private func readJobs() -> JobsState {
+        var st = JobsState()
+        st.daemonInstalled = FileManager.default.fileExists(
+            atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.slotkeeper-jobs.plist")
+        let root = home.appendingPathComponent("jobs")
+        if let flag = try? String(contentsOf: root.appendingPathComponent("jobs.pause"), encoding: .utf8) {
+            st.pauseFlag = flag.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func files(_ folder: String) -> [URL] {
+            ((try? FileManager.default.contentsOfDirectory(
+                at: root.appendingPathComponent(folder), includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "json" }.sorted { $0.path > $1.path }
+        }
+        st.queued = files("queued").count
+        func job(_ url: URL) -> [String: Any]? {
+            guard let d = try? Data(contentsOf: url) else { return nil }
+            return try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+        }
+        if let first = files("running").first, let o = job(first) {
+            st.running = (o["task"] as? String)?.prefix(50).description
+        }
+        st.lastResults = files("done").prefix(2).compactMap { url in
+            guard let o = job(url) else { return nil }
+            let result = o["result"] as? String ?? "?"
+            let mins = (o["elapsed_s"] as? Double).map { String(format: "%.0f min", $0 / 60) } ?? "–"
+            return "\(result): \((o["task"] as? String ?? "").prefix(40)) (\(mins))"
+        }
+        return st
+    }
+
+    func toggleJobsPause() {
+        let flag = home.appendingPathComponent("jobs/jobs.pause")
+        if jobs.pauseFlag == nil {
+            try? FileManager.default.createDirectory(at: home.appendingPathComponent("jobs"), withIntermediateDirectories: true)
+            try? "paused from the menu bar".write(to: flag, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: flag)
+        }
+        refresh()
+    }
+
     struct ExerciserState {
         var installed = false
         var paused: String?
@@ -354,10 +428,12 @@ final class StatusModel: ObservableObject {
             var plan = PlanSummary()
             if version != nil { plan = await fetchPlan() }
             let ex = readExerciser()
+            let jobsState = readJobs()
             let active = readActiveRequest(exerciser: ex, exerciserProgress: ex.progress)
             let cpu = await serverCPUPercent()
             await MainActor.run {
                 self.exerciser = ex
+                self.jobs = jobsState
                 self.activeRequest = active
                 self.serverCPU = cpu
                 self.version = version ?? ""

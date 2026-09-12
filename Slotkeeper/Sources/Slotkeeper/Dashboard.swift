@@ -8,22 +8,40 @@ struct DashboardView: View {
     @State private var runs: [ExerciserRun] = []
     @State private var requests: [OpenCodeRequest] = []
     @State private var requestsNote: String?
+    @State private var jobs: [JobRow] = []
+    @State private var newJobRepo = NSHomeDirectory()
+    @State private var newJobTask = ""
+    @State private var newJobAuto = false
+    @State private var jobActionNote: String?
     @State private var hours = 24.0
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("Slotstream Dashboard").font(.title2).bold()
-                    Spacer()
-                    Picker("Window", selection: $hours) {
-                        Text("6h").tag(6.0); Text("24h").tag(24.0); Text("3d").tag(72.0); Text("7d").tag(168.0)
-                    }.pickerStyle(.segmented).frame(width: 220)
-                    Button("Reload") { load() }
-                }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Slotkeeper").font(.title2).bold()
+                Spacer()
+                Picker("Window", selection: $hours) {
+                    Text("6h").tag(6.0); Text("24h").tag(24.0); Text("3d").tag(72.0); Text("7d").tag(168.0)
+                }.pickerStyle(.segmented).frame(width: 220)
+                Button("Reload") { load() }
+            }
+            .padding(.horizontal, 20).padding(.top, 16)
+            TabView {
+                ScrollView { VStack(alignment: .leading, spacing: 18) { yourRequests }.padding(20) }
+                    .tabItem { Text("Your work") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
+                    .tabItem { Text("Jobs") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { systemTab }.padding(20) }
+                    .tabItem { Text("System") }
+            }
+        }
+        .frame(minWidth: 860, minHeight: 720)
+        .onAppear(perform: load)
+        .onChange(of: hours) { _, _ in load() }
+    }
 
-                yourRequests
-
+    private var systemTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
                 GroupBox("Expert cache and memory pressure") {
                     Chart {
                         ForEach(monitor) { s in
@@ -76,12 +94,7 @@ struct DashboardView: View {
                 }
 
                 summary
-            }
-            .padding(20)
         }
-        .frame(minWidth: 820, minHeight: 700)
-        .onAppear(perform: load)
-        .onChange(of: hours) { _, _ in load() }
     }
 
     private var summary: some View {
@@ -145,6 +158,61 @@ struct DashboardView: View {
         }
     }
 
+    /// Unattended tasks: what is waiting, what ran, and a way to add one without the terminal.
+    private var jobsTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Queue a task for the local model") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        TextField("repository path", text: $newJobRepo).frame(width: 280)
+                        Toggle("approve tool calls (--auto)", isOn: $newJobAuto)
+                        Spacer()
+                        Button("Queue job") { addJob() }
+                            .disabled(newJobRepo.isEmpty || newJobTask.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    TextEditor(text: $newJobTask).frame(height: 60).border(.quaternary)
+                    Text(jobsAdvice).font(.caption).foregroundStyle(.secondary)
+                    if let note = jobActionNote { Text(note).font(.caption).foregroundStyle(.secondary) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Jobs") {
+                VStack(alignment: .leading, spacing: 8) {
+                    if jobs.isEmpty {
+                        Text("nothing queued or finished yet").font(.callout).foregroundStyle(.secondary)
+                    }
+                    Table(jobs) {
+                        TableColumn("state") { j in
+                            Text(j.result).foregroundStyle(j.result == "ok" ? .green : (j.result == "queued" || j.result == "running" ? .orange : .red))
+                        }.width(70)
+                        TableColumn("project") { Text($0.project) }.width(100)
+                        TableColumn("task") { Text($0.task).lineLimit(1) }
+                        TableColumn("elapsed") { Text($0.elapsed.map { String(format: "%.0f min", $0 / 60) } ?? "–") }.width(65)
+                        TableColumn("changed") { Text($0.changedFiles.map { "\($0) files" } ?? "–") }.width(70)
+                        TableColumn("log") { j in
+                            Button("open") { NSWorkspace.shared.open(DashboardView.jobLog(j.id)) }.buttonStyle(.link)
+                        }.width(45)
+                    }
+                    .frame(minHeight: 300)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var jobsAdvice: String {
+        "One `opencode run` per job, one at a time, only while you are away: the runner waits for "
+            + "your own OpenCode session, battery, memory pressure and the night window. Without --auto it "
+            + "stops at the first tool call needing approval; with it, review the diff afterwards."
+    }
+
+    private func addJob() {
+        var args = ["add", (newJobRepo as NSString).expandingTildeInPath, newJobTask]
+        if newJobAuto { args.append("--auto") }
+        let out = DashboardView.runJobs(args)
+        jobActionNote = out.split(separator: "\n").first.map(String.init) ?? "queued"
+        newJobTask = ""
+        loadJobs()
+    }
+
     /// Built outside the view body: the type checker gives up on long interpolated sums.
     private func reuseLine(reused: [OpenCodeRequest], cold: [OpenCodeRequest]) -> String {
         func med(_ rs: [OpenCodeRequest]) -> String {
@@ -206,6 +274,45 @@ struct DashboardView: View {
         }
         runs = rs.sorted { $0.ts < $1.ts }
         loadRequests(iso: date)
+        loadJobs()
+    }
+
+    /// The job files are ours, so read them directly; only `add` goes through the script.
+    private func loadJobs() {
+        let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/jobs")
+        var rows: [JobRow] = []
+        for folder in ["running", "queued", "done"] {
+            let dir = root.appendingPathComponent(folder)
+            for f in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            where f.pathExtension == "json" {
+                guard let d = try? Data(contentsOf: f),
+                      let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                      let id = o["id"] as? String else { continue }
+                rows.append(JobRow(
+                    id: id, repo: o["repo"] as? String ?? "", task: o["task"] as? String ?? "",
+                    result: folder == "running" ? "running" : (o["result"] as? String ?? folder),
+                    elapsed: o["elapsed_s"] as? Double, changedFiles: o["changed_files"] as? Int,
+                    finished: o["finished"] as? String))
+            }
+        }
+        jobs = rows.sorted { $0.id > $1.id }
+    }
+
+    static func jobLog(_ id: String) -> URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/jobs/logs/\(id).log")
+    }
+
+    @discardableResult
+    static func runJobs(_ args: [String]) -> String {
+        let script = URL(fileURLWithPath: reportPath).deletingLastPathComponent().appendingPathComponent("jobs.py").path
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = ["python3", script] + args
+        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = pipe
+        do { try task.run() } catch { return "could not run jobs.py: \(error.localizedDescription)" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private func loadRequests(iso date: (String) -> Date?) {
@@ -243,6 +350,17 @@ struct DashboardView: View {
         let ctl = StatusModel.settings["SLOTSTREAM_CTL"] ?? NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper"
         return URL(fileURLWithPath: ctl).deletingLastPathComponent().appendingPathComponent("report.py").path
     }
+}
+
+struct JobRow: Identifiable {
+    var id: String
+    var repo: String
+    var task: String
+    var result: String
+    var elapsed: Double?
+    var changedFiles: Int?
+    var finished: String?
+    var project: String { URL(fileURLWithPath: repo).lastPathComponent }
 }
 
 struct OpenCodeRequest: Identifiable {
