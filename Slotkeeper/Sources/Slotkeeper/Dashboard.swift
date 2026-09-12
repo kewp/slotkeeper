@@ -4,6 +4,8 @@ import SwiftUI
 /// First dashboard window: what the monitor and exerciser have recorded, as charts.
 /// Reads the JSONL files directly; no server round-trips.
 struct DashboardView: View {
+    /// Shared with the menu bar, which already polls state every two seconds.
+    @ObservedObject var status: StatusModel
     @State private var monitor: [MonitorSample] = []
     @State private var runs: [ExerciserRun] = []
     @State private var requests: [OpenCodeRequest] = []
@@ -19,6 +21,7 @@ struct DashboardView: View {
     @State private var logFilter = ""
     @State private var health: [String] = []
     @State private var stuckPressureNote = ""
+    @State private var liveWasActive = false
     @State private var hours = 24.0
 
     var body: some View {
@@ -33,7 +36,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 20).padding(.top, 16)
             TabView {
-                ScrollView { VStack(alignment: .leading, spacing: 18) { yourRequests }.padding(20) }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
                     .tabItem { Text("Your work") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
                     .tabItem { Text("Jobs") }
@@ -48,6 +51,15 @@ struct DashboardView: View {
         .frame(minWidth: 860, minHeight: 720)
         .onAppear(perform: load)
         .onChange(of: hours) { _, _ in load() }
+        // While a request is running, refresh the table often enough to watch turns land,
+        // and leave it alone when the server is idle: each reload spawns report.py.
+        .onReceive(Timer.publish(every: 20, on: .main, in: .common).autoconnect()) { _ in
+            if status.activeRequest != nil || liveWasActive {
+                liveWasActive = status.activeRequest != nil
+                loadRequests(iso: DashboardView.parseDate)
+                loadJobs()
+            }
+        }
     }
 
     private var systemTab: some View {
@@ -123,6 +135,45 @@ struct DashboardView: View {
         }
     }
 
+    /// The request happening right now, from the plugin's marker and the server log.
+    private var live: some View {
+        GroupBox(status.activeRequest == nil ? "Nothing in flight" : "In flight now") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let req = status.activeRequest {
+                    Text(req.source).font(.headline)
+                    if let fraction = livePrefillFraction {
+                        ProgressView(value: fraction) {
+                            Text(livePrefillLabel).font(.caption)
+                        }
+                    }
+                    ForEach(req.lines, id: \.self) { Text($0).font(.callout) }
+                    if let cpu = status.serverCPU {
+                        Text(String(format: "server cpu %.0f%%", cpu)).font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("The server is idle. Your next OpenCode turn shows up here with its prefill progress.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                ForEach(status.detailLines, id: \.self) { line in
+                    Text(line).font(.caption).foregroundStyle(.secondary)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// "4096/9125 tokens (45%), ~52 s left" -> 0.45
+    private var livePrefillFraction: Double? {
+        for line in status.activeRequest?.lines ?? [] {
+            guard let open = line.firstIndex(of: "("), let close = line[open...].firstIndex(of: "%") else { continue }
+            if let value = Double(line[line.index(after: open)..<close]) { return value / 100 }
+        }
+        return nil
+    }
+
+    private var livePrefillLabel: String {
+        status.activeRequest?.lines.first(where: { $0.contains("tokens") }) ?? "reading the prompt"
+    }
+
     /// Your own OpenCode work, which is the point of the whole setup. Read through
     /// `scripts/report.py --requests`, which owns the query into OpenCode's database.
     private var yourRequests: some View {
@@ -140,6 +191,10 @@ struct DashboardView: View {
                         + (inFlight.isEmpty ? "" : ", \(inFlight.count) generating")
                         + ", \(Set(requests.map(\.session)).count) sessions")
                         .font(.callout)
+                    if let rate = median(requests.compactMap(\.cacheHitRate)) {
+                        Text(String(format: "the server reused a median %.0f%% of each prompt — a turn that reuses nothing pays the full prefill again", rate))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if !long.isEmpty {
                         Text(reuseLine(reused: reused, cold: cold))
                             .font(.caption).foregroundStyle(.secondary)
@@ -157,6 +212,9 @@ struct DashboardView: View {
                         TableColumn("out") { Text($0.output.map { "\($0)" } ?? "–") }.width(50)
                         TableColumn("TTFT") { Text($0.ttft.map { String(format: "%.0fs", $0) } ?? "–") }.width(55)
                         TableColumn("decode") { Text($0.decode.map { String(format: "%.1f", $0) } ?? "–") }.width(55)
+                        TableColumn("reused") { r in
+                            Text(r.reuseText).foregroundStyle(r.reuseColour)
+                        }.width(70)
                         TableColumn("turn") { Text($0.followup ? "follow-up" : "cold").foregroundStyle($0.followup ? .green : .secondary) }.width(75)
                         TableColumn("status") { r in
                             Text(r.error ?? "ok").foregroundStyle(r.error == nil ? .green : (r.error == "in flight" ? .orange : .red))
@@ -470,6 +528,12 @@ struct DashboardView: View {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    static func parseDate(_ s: String) -> Date? {
+        let iso = ISO8601DateFormatter()
+        let frac = ISO8601DateFormatter(); frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return iso.date(from: s) ?? frac.date(from: s)
+    }
+
     private func loadRequests(iso date: (String) -> Date?) {
         let script = DashboardView.reportPath
         guard FileManager.default.isExecutableFile(atPath: script) else {
@@ -496,7 +560,8 @@ struct DashboardView: View {
                 ts: ts, session: o["session"] as? String ?? "?", agent: o["agent"] as? String ?? "",
                 cwd: o["cwd"] as? String, prompt: o["prompt"] as? Int, output: o["output"] as? Int,
                 ttft: o["ttft_s"] as? Double, decode: o["decode_tok_s"] as? Double,
-                error: o["error"] as? String, followup: o["followup"] as? Bool ?? false)
+                error: o["error"] as? String, followup: o["followup"] as? Bool ?? false,
+                cacheHitRate: o["cache_hit_rate"] as? Double)
         }.sorted { $0.ts < $1.ts }
     }
 
@@ -530,6 +595,13 @@ struct OpenCodeRequest: Identifiable {
     var decode: Double?
     var error: String?
     var followup: Bool
+    /// What the server said it reused of this prompt, when the plugin recorded the turn.
+    var cacheHitRate: Double?
+    var reuseText: String { cacheHitRate.map { String(format: "%.0f%%", $0) } ?? "–" }
+    var reuseColour: Color {
+        guard let rate = cacheHitRate else { return .secondary }
+        return rate >= 80 ? .green : (rate >= 20 ? .orange : .red)
+    }
     /// The last path component is what you recognise: "prices-app", not the whole path.
     var project: String { cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "" }
 }

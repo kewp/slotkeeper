@@ -19,7 +19,7 @@ Then the synthetic evidence from ~/.slotstream/metrics/{exerciser.jsonl,bench.js
   - pressure minutes, cache resize events, battery time, disk floor
   - server process CPU/RSS peaks during tasks
 """
-import argparse, glob, json, os, sqlite3, statistics, sys
+import argparse, glob, json, os, re, sqlite3, statistics, sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -152,6 +152,7 @@ def opencode_requests(since):
             # 3,562 of these in three minutes against the server. A failure, not a request.
             err = "empty"
         row = {"id": mid, "session": sid, "agent": d.get("agent"), "ts": created, "prompt": prompt, "output": output,
+               "cached_tokens": None, "cache_hit_rate": None, "prompt_delta": None,
                # A tool-call message emits a few tokens in a fraction of a second, which divides
                # out to a decode rate the model cannot reach. Only rate real generations.
                "ttft_s": ttft, "decode_tok_s": (round(output / decode_s, 2)
@@ -162,6 +163,11 @@ def opencode_requests(since):
         if extra:
             row["experts_per_layer"] = extra.get("expertsCachedPerLayer")
             row["pressure"] = extra.get("pressure")
+            # What the server said it reused: the difference between a turn that costs
+            # seconds and one that re-reads the whole conversation.
+            row["cached_tokens"] = extra.get("cachedInputTokens")
+            row["cache_hit_rate"] = extra.get("cacheHitRate")
+            row["prompt_delta"] = extra.get("promptDelta")
             if extra.get("ttftMs") is not None:
                 row["ttft_s"] = extra["ttftMs"] / 1000  # the plugin's stopwatch is the exact one
         out.append(row)
@@ -193,6 +199,8 @@ def opencode_summary(reqs):
         "ttft_med_s": med([r["ttft_s"] for r in ok]), "ttft_p90_s": pct([r["ttft_s"] for r in ok], 0.9),
         "decode_med": med([r["decode_tok_s"] for r in ok]),
         "ttft_by_prompt": buckets,
+        "cache_hit_rate_med": med([r["cache_hit_rate"] for r in ok if r.get("cache_hit_rate") is not None]),
+        "reported_reuse": len([r for r in ok if r.get("cache_hit_rate") is not None]),
         # Above 8K a cold prompt costs minutes; a reused prefix should make a follow-up cost seconds.
         "over_8k_followup": split([r for r in big if r["followup"]]), "over_8k_cold": split([r for r in big if not r["followup"]]),
         "recent_errors": grouped_errors(reqs)[-8:],
@@ -308,6 +316,9 @@ def main():
         if oc["ttft_by_prompt"]:
             print("  TTFT by prompt size:  " + "   ".join(
                 f"{k}: n={v['n']} med {v['ttft_med_s']} s p90 {v['ttft_p90_s']} s" for k, v in oc["ttft_by_prompt"].items()))
+        if oc["reported_reuse"]:
+            print(f"  the server reused a median {oc['cache_hit_rate_med']}% of the prompt on "
+                  f"{oc['reported_reuse']} of those requests (the plugin reads this from the server's own usage)")
         f, c = oc["over_8k_followup"], oc["over_8k_cold"]
         if f["n"] or c["n"]:
             print(f"  prompts over 8K: follow-up turns n={f['n']} TTFT median {f['ttft_med_s']} s | cold n={c['n']} TTFT median {c['ttft_med_s']} s")

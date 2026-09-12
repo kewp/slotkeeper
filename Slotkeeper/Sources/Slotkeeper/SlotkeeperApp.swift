@@ -24,7 +24,7 @@ struct SlotkeeperApp: App {
         .menuBarExtraStyle(.menu)
 
         Window("Slotstream Dashboard", id: "dashboard") {
-            DashboardView()
+            DashboardView(status: status)
         }
         .defaultSize(width: 900, height: 800)
     }
