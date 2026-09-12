@@ -113,7 +113,22 @@ on deep), then 1 and 2 (they help at every window size), then 3, then 4.
   server's hit counter going 0 to 2. This is the C2 qualification. A 54K
   prompt re-read from scratch took 27.2 min, so what a long session costs
   depends entirely on whether its prefix survives.
-- Next, in order: (1) prove the resume path on a refused 58K prompt (running);
+- 04:10, resume verified end to end. A 40K prefill was cancelled 4 minutes in;
+  the server retained 16,384 committed tokens, and the re-sent identical prompt
+  logged `reading 23708 prompt tokens` instead of 40,092, with the prefix hit
+  counter going 0 to 1. 41% of the prompt was skipped. The same retention path
+  serves memory refusals, which the T0 checks cover per failure code.
+- The 58K refusal is not deterministic: the same prompt that failed three times
+  at 01:43 to 02:55 completed at 03:47 in 29.8 minutes (31 tok/s) once the
+  machine was quieter. Refusals depend on free memory at that moment, not on a
+  hard ceiling, so the full 65K window is usable on a quiet Mac.
+- Prefill rate is the least predictable number here: 25 to 89 tok/s for the same
+  class of prompt, drifting with prompt length and file-cache warmth. Time
+  estimates for long prompts should use the low end.
+- After three back-to-back 56K prefills, a server restart took 16 minutes to
+  load the model instead of 30 seconds; heavy prefill I/O evicts the weights
+  from the file cache, so a restart after heavy work is not free.
+- Next, in order: (1) done: resume verified;
   (2) a real long OpenCode session on deep, read with `scripts/report.py`
   (follow-up TTFT, prefix hits) — the open question is whether OpenCode keeps
   earlier messages byte-identical between turns; (3) disk-backed retention and
