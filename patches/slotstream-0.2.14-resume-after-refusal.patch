@@ -1,3 +1,19 @@
+diff -ruN a/Sources/Slotstream/Engine.swift b/Sources/Slotstream/Engine.swift
+--- a/Sources/Slotstream/Engine.swift	2026-09-11 17:38:50
++++ b/Sources/Slotstream/Engine.swift	2026-09-12 02:57:34
+@@ -1098,7 +1098,11 @@
+                let ticket = pressureBoundary.snapshot() {
+                 stats.memoryPressureBoundarySeconds = RuntimeClock.seconds(since: ticket.requestedAt)
+             }
+-            prefixCache.drop()
++            // Free the older conversations, but keep the boundary this request
++            // just committed: the retry resumes from it instead of re-reading
++            // the whole prompt, which is the difference between a retry that
++            // costs seconds and one that costs the same twenty minutes again.
++            if failure.retainsCommittedPrefix { prefixCache.dropAllButLatest() } else { prefixCache.drop() }
+             Stream.gpu.synchronize()
+             MLX.Memory.clearCache()
+         }
 diff -ruN a/Sources/Slotstream/Generate.swift b/Sources/Slotstream/Generate.swift
 --- a/Sources/Slotstream/Generate.swift	2026-09-11 16:44:16
 +++ b/Sources/Slotstream/Generate.swift	2026-09-12 00:38:37
@@ -76,6 +92,34 @@ diff -ruN a/Sources/Slotstream/Model.swift b/Sources/Slotstream/Model.swift
          /// Speculative-decode companions, created lazily by the MTP-aware
          /// generate path: the draft head's own attention state, and the
          /// pre-mixer multi stream at the last consumed position (the next
+diff -ruN a/Sources/Slotstream/PrefixCache.swift b/Sources/Slotstream/PrefixCache.swift
+--- a/Sources/Slotstream/PrefixCache.swift	2026-09-11 16:44:16
++++ b/Sources/Slotstream/PrefixCache.swift	2026-09-12 02:57:34
+@@ -541,6 +541,24 @@
+ 
+     /// Release everything held. Used by the governor when memory tightens and
+     /// by `--no-prefix-cache`.
++    /// Release every retained conversation except the most recently touched.
++    ///
++    /// A request refused for memory has just published the boundary its prefill
++    /// reached, and that boundary is the most expensive thing on the machine to
++    /// rebuild: 50,176 tokens, 20 minutes of prefill, measured 2026-09-12.
++    /// Dropping everything frees the older conversations, which is what the
++    /// failure needs, while the retry still resumes.
++    @discardableResult
++    public func dropAllButLatest() -> Int {
++        lock.lock()
++        defer { lock.unlock() }
++        guard let keep = entries.indices.max(by: { entries[$0].used < entries[$1].used }) else { return 0 }
++        let dropped = entries.count - 1
++        _evictions += dropped
++        entries = [entries[keep]]
++        return dropped
++    }
++
+     public func drop() {
+         lock.lock()
+         defer { lock.unlock() }
 diff -ruN a/Sources/Slotstream/RequestControl.swift b/Sources/Slotstream/RequestControl.swift
 --- a/Sources/Slotstream/RequestControl.swift	2026-09-11 16:44:16
 +++ b/Sources/Slotstream/RequestControl.swift	2026-09-12 00:32:17
@@ -136,11 +180,27 @@ diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+Governor.swift b/Sources/S
  }
 diff -ruN a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift
 --- a/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-11 18:52:39
-+++ b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-12 00:32:17
-@@ -172,6 +172,22 @@
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+PrefixCapacity.swift	2026-09-12 02:59:02
+@@ -172,6 +172,38 @@
              _ = try Planner.applyingRuntimePolicy(floor, policy: RuntimeAllocationPolicy(prefixCacheTokens: ContextPolicy.maxTokens))
              c.expect("full retention at the floor is refused, not borrowed", false)
          } catch { c.expect("full retention at the floor is refused, not borrowed", true, "\(error)") }
++        // A memory failure frees the older conversations and keeps the newest,
++        // which is the boundary the refused prefill just published.
++        let survivors = PrefixCache(maxTokens: 8192)
++        for n in 0..<3 {
++            let ids = Array(repeating: 3000 + n, count: 17)
++            survivors.store(state: state(ids), tokens: ids)
++        }
++        let newest = Array(repeating: 3002, count: 17)
++        c.equal("three conversations before the failure", survivors.json()["conversations"] as? Int, 3)
++        c.equal("dropping all but the latest releases the rest", survivors.dropAllButLatest(), 2)
++        c.equal("one conversation survives", survivors.json()["conversations"] as? Int, 1)
++        c.equal("and it is the most recently touched", survivors.peek(extending: Array(newest.dropLast())), newest)
++        c.equal("an empty cache drops nothing", PrefixCache(maxTokens: 8192).dropAllButLatest(), 0)
++        survivors.drop()
++        c.equal("an explicit drop still clears everything", survivors.json()["conversations"] as? Int, 0)
++
 +        // Which failures may keep the prefix their prefill already committed.
 +        for code in [RequestFailure.Code.insufficientMemory, .prefillWaitExceeded, .prefillDeadlineExceeded,
 +                     .clientCancelled, .contextLengthExceeded] {

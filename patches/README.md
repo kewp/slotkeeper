@@ -13,7 +13,7 @@ checks included.
 | `slotstream-0.2.14-opencode-retry.patch` | Pre-output memory-pressure failures say `try your request again`, which OpenCode's retry classifier recognises; post-output failures keep the non-retryable wording so a replay cannot duplicate text or tool effects. Non-cancellation request failures are logged to stderr. | assertions added to `context-serving` (queued-pressure and governor-unavailable pre-output paths) |
 | `slotstream-0.2.14-prefix-retention.patch` | `serve --prefix-cache-tokens <n\|full>` (or `SLOTSTREAM_PREFIX_CACHE_TOKENS`) sets how much conversation state the prefix cache may retain. The planner caps it at the context window, charges it against the expert pool before sizing experts, refuses at startup if the pool would fall below its floor, and reports it in `/api/show` as `runtime_prefix_cache_tokens`. The governor keeps the explicit ceiling across resizes. | assertions added to `prefix-client-capacity` (window cap, pool charge, peak unchanged, `--no-prefix-cache` precedence, invalid values, governor shed, refusal at the floor) |
 | `slotstream-0.2.14-pressure-ceiling.patch` | After an OS pressure event the elastic governor remembers the pool that met it, and for 20 minutes will not regrow past 1 GB below it. Repeated events ratchet the ceiling down; an availability shrink is never blocked; the ceiling is forgotten after the window. | assertions added to `governor-check` (regrowth capped, reason string, cooldown still applies, forgotten after the window, no effect when above the replan, dead-band respected, shrink unaffected, ratchet) |
-| `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. Execution errors still keep nothing. A governor shrink no longer drops a large retained prefix before it sheds the expert pool. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state) and `governor-check` (drop order at and above the floor) |
+| `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. The engine's memory-failure teardown then frees the other conversations but keeps that one (`dropAllButLatest`), instead of dropping everything. Execution errors still keep nothing. A governor shrink no longer drops a large retained prefix before it sheds the expert pool. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state, what survives a memory failure) and `governor-check` (drop order at and above the floor) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
 
 ## Apply and build
@@ -223,15 +223,30 @@ refills from SSD as requests run.
 > and the pool has not reached its floor, because a long prefix costs minutes
 > of prefill to rebuild while the pool refills from SSD as requests run.
 >
+> The engine's own teardown for a memory failure dropped the whole prefix
+> cache, including the boundary just published, so the first version of this
+> change kept nothing in practice: measured on 2026-09-12, three consecutive
+> 58K attempts each logged "kept ~50,000 committed prompt tokens" and each
+> still re-read the prompt from zero. `PrefixCache.dropAllButLatest` now frees
+> the older conversations and keeps the newest, which is the boundary the
+> refused prefill just committed.
+>
 > Tests: assertions added to `prefix-client-capacity` (per-code retention,
-> controller state after a refusal versus an execution error) and
-> `governor-check` (drop order at, above and at the boundary of the protected
-> size).
+> controller state after a refusal versus an execution error, what survives a
+> memory failure) and `governor-check` (drop order at, above and at the
+> boundary of the protected size).
 
 ## Status
 
-2026-09-12 00:41: all five patches installed as release
-`slotstream-0.2.14-local-20260912004057`, on the deep (65,536) profile.
+2026-09-12 03:17: all five patches installed as release
+`slotstream-0.2.14-local-20260912030119`, on the deep (65,536) profile, with
+the `dropAllButLatest` half of the fifth patch included. That install took 16
+minutes to load the model, against the usual 30 seconds, after three
+back-to-back 56K prefills had emptied the file cache.
+
+2026-09-12 00:41: the first version of the fifth patch installed as
+`slotstream-0.2.14-local-20260912004057`; it kept the boundary and the engine
+then dropped it.
 
 2026-09-11 22:42: the first four installed as release
 `slotstream-0.2.14-local-20260911224202`. `ctl.env` also sets
