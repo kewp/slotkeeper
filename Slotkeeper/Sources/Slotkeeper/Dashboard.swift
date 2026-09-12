@@ -28,6 +28,8 @@ struct DashboardView: View {
     @State private var calibrating = false
     @State private var autoCalibrationStopped = false
     @State private var calibrationNote: String?
+    @State private var calibrationProgress: CalibrationProgress?
+    @State private var budget: BudgetTables?
     @State private var hours = 24.0
 
     var body: some View {
@@ -44,6 +46,8 @@ struct DashboardView: View {
             TabView {
                 ScrollView { VStack(alignment: .leading, spacing: 18) { capacityCard; live; overview }.padding(20) }
                     .tabItem { Text("Overview") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { capacityTab }.padding(20) }
+                    .tabItem { Text("Capacity") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
                     .tabItem { Text("Your work") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
@@ -59,6 +63,10 @@ struct DashboardView: View {
         .frame(minWidth: 860, minHeight: 720)
         .onAppear(perform: load)
         .onChange(of: hours) { _, _ in load() }
+        // Calibration publishes what it is doing; while it runs, follow it closely.
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            if calibrating || calibrationProgress != nil { loadCalibration() }
+        }
         // While a request is running, refresh the table often enough to watch turns land,
         // and leave it alone when the server is idle: each reload spawns report.py.
         .onReceive(Timer.publish(every: 20, on: .main, in: .common).autoconnect()) { _ in
@@ -226,6 +234,23 @@ struct DashboardView: View {
                          : "runs on its own when you are away, or start it now")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                if let p = calibrationProgress, calibrating {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(p.headline).font(.callout)
+                        if let bar = p.fractionDone {
+                            ProgressView(value: bar) { Text(p.step).font(.caption) }
+                        }
+                        ForEach(p.rows) { row in
+                            HStack(spacing: 8) {
+                                Text(row.ok ? "✓" : "✗").foregroundStyle(row.ok ? .green : .red)
+                                Text("\(row.window / 1000)K window").foregroundStyle(.secondary)
+                                Text("\(row.size.formatted()) tokens")
+                                Text(row.detail).foregroundStyle(.secondary)
+                            }.font(.caption)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack(spacing: 10) {
                     Button(calibrating ? "Measuring…" : "Measure now") { startCalibration() }
                         .disabled(calibrating)
@@ -262,6 +287,8 @@ struct DashboardView: View {
         autoCalibrationStopped = FileManager.default.fileExists(
             atPath: home.appendingPathComponent("calibrate.pause").path)
         calibrating = !DashboardView.shell("/usr/bin/pgrep", ["-f", "calibrate.py"]).isEmpty
+        calibrationProgress = CalibrationProgress(
+            file: home.appendingPathComponent("calibration.progress.json"))
         guard let data = try? Data(contentsOf: home.appendingPathComponent("calibration.json")),
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             calibration = nil
@@ -279,6 +306,87 @@ struct DashboardView: View {
             machine: o["machine"] as? String ?? "",
             measured: (o["finished_at"] as? String).flatMap(DashboardView.parseDate),
             limitedBy: o["limited_by"] as? String)
+    }
+
+    /// Why the numbers are what they are: where the memory goes, what each window would
+    /// cost, what a different machine would do, and what the tests actually measured.
+    private var capacityTab: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            capacityCard
+            GroupBox("Where the memory goes right now") {
+                if let ledger = budget?.ledger, !ledger.items.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(ledger.items, id: \.name) { item in
+                            HStack {
+                                Text(item.name).frame(width: 260, alignment: .leading)
+                                Text(String(format: "%.2f GB", item.gb)).monospacedDigit()
+                                    .frame(width: 80, alignment: .trailing)
+                                GeometryReader { geo in
+                                    Rectangle().fill(.blue.opacity(0.35))
+                                        .frame(width: max(2, geo.size.width * item.gb / max(1, ledger.targetGB)))
+                                }.frame(height: 10)
+                            }.font(.callout)
+                        }
+                        Divider()
+                        Text(String(format: "expected peak %.2f GB against a %.2f GB target at a %@ window",
+                                    ledger.peakGB, ledger.targetGB, ledger.window.formatted()))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text("the server is not answering right now").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            WindowCostTable(rows: budgetWindows)
+            MachineTable(rows: budgetMachines)
+            GroupBox("What the sweeps measured") {
+                if sweeps.isEmpty {
+                    Text("no sweeps recorded in this window").font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Table(sweeps) {
+                        TableColumn("run") { Text($0.label) }.width(120)
+                        TableColumn("prompt") { Text($0.prompt.map { $0.formatted() } ?? "–") }.width(70)
+                        TableColumn("result") { r in
+                            Text(r.ok ? "ok" : (r.errorCode ?? "failed")).foregroundStyle(r.ok ? .green : .red)
+                        }.width(150)
+                        TableColumn("to first token") { Text($0.ttft.map { String(format: "%.0f s", $0) } ?? "–") }.width(100)
+                        TableColumn("reading") { Text($0.prefill.map { String(format: "%.0f tok/s", $0) } ?? "–") }.width(90)
+                        TableColumn("generating") { Text($0.decode.map { String(format: "%.1f tok/s", $0) } ?? "–") }.width(90)
+                        TableColumn("cache") { Text($0.expertsBefore.map { "\($0)/layer" } ?? "–") }
+                    }.frame(minHeight: 220)
+                    Text(sweepSummary).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onAppear(perform: loadBudget)
+    }
+
+    /// The practical translation: at the measured rates, what does a prompt cost in time?
+    private var sweepSummary: String {
+        let ok = sweeps.filter { $0.ok && $0.prefill != nil }
+        guard let rate = median(ok.compactMap(\.prefill)), rate > 0 else { return "" }
+        let decode = median(sweeps.compactMap(\.decode)) ?? 0
+        let cold = 25_000.0 / rate / 60
+        return String(format: "At %.0f tok/s reading, a cold 25,000-token prompt takes about %.0f min to "
+                      + "its first token; a follow-up that only adds 500 tokens takes about %.0f s. "
+                      + "Generating 300 tokens at %.1f tok/s adds about %.0f s.",
+                      rate, cold, 500 / rate, decode, decode > 0 ? 300 / decode : 0)
+    }
+
+    private var sweeps: [ExerciserRun] {
+        runs.filter { $0.task.hasPrefix("sweep-") }.sorted { $0.ts < $1.ts }
+    }
+
+    private var budgetWindows: [BudgetTables.WindowRow] { budget?.windows ?? [] }
+    private var budgetMachines: [BudgetTables.MachineRow] { budget?.machines ?? [] }
+
+    private func loadBudget() {
+        var args = ["--tables", "--json"]
+        if let experts = status.plan.expertsPerLayer { args += ["--experts", "\(experts)"] }
+        if let percent = StatusModel.settings["SLOTSTREAM_MAX_RAM_PERCENT"] { args += ["--percent", percent] }
+        let out = DashboardView.runScript("window-budget.py", args)
+        guard let data = out.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        budget = BudgetTables(json: o)
     }
 
     /// The one-screen answer to "how is it going": how long it has been up, what it has
@@ -694,7 +802,9 @@ struct DashboardView: View {
                 ts: ts, task: o["task"] as? String ?? "?", ok: o["ok"] as? Bool ?? false, note: o["note"] as? String ?? "",
                 prompt: o["prompt_tokens"] as? Int, ttft: o["ttft_s"] as? Double, decode: o["decode_tok_s"] as? Double,
                 expertsBefore: (o["plan_before"] as? [String: Any])?["experts_per_layer"] as? Int,
-                cpuPeak: (o["process"] as? [String: Any])?["cpu_peak"] as? Double))
+                cpuPeak: (o["process"] as? [String: Any])?["cpu_peak"] as? Double,
+                label: o["label"] as? String ?? "", prefill: o["prefill_tok_s"] as? Double,
+                errorCode: ((o["error"] as? [String: Any])?["code"] as? String)))
         }
         runs = rs.sorted { $0.ts < $1.ts }
         loadRequests(iso: date)
@@ -790,6 +900,63 @@ struct DashboardView: View {
     static var reportPath: String {
         let ctl = StatusModel.settings["SLOTSTREAM_CTL"] ?? NSHomeDirectory() + "/slotkeeper/scripts/slotkeeper"
         return URL(fileURLWithPath: ctl).deletingLastPathComponent().appendingPathComponent("report.py").path
+    }
+}
+
+/// What calibration is doing right now, from ~/.slotstream/calibration.progress.json.
+struct CalibrationProgress {
+    struct Row: Identifiable {
+        var id: String { "\(window)-\(size)" }
+        var window: Int
+        var size: Int
+        var ok: Bool
+        var ttft: Double?
+        var error: String?
+        var detail: String {
+            if let e = error { return e }
+            return ttft.map { String(format: "%.0f s to first token", $0) } ?? "done"
+        }
+    }
+
+    var phase: String
+    var window: Int?
+    var size: Int?
+    var windows: [Int]
+    var rows: [Row]
+
+    init?(file: URL) {
+        guard let data = try? Data(contentsOf: file),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        phase = o["phase"] as? String ?? "working"
+        window = o["window"] as? Int
+        size = o["size"] as? Int
+        windows = o["windows"] as? [Int] ?? []
+        rows = (o["rows"] as? [[String: Any]] ?? []).map {
+            Row(window: $0["window"] as? Int ?? 0, size: $0["size"] as? Int ?? 0,
+                ok: $0["ok"] as? Bool ?? false, ttft: $0["ttft_s"] as? Double,
+                error: $0["error"] as? String)
+        }
+    }
+
+    var headline: String {
+        guard let w = window else { return phase }
+        var line = "testing a \(w.formatted()) window"
+        if windows.count > 1, let index = windows.firstIndex(of: w) {
+            line += " (\(index + 1) of \(windows.count) to try)"
+        }
+        return line
+    }
+
+    var step: String {
+        if let s = size { return "sending \(s.formatted()) tokens — " + phase }
+        return phase
+    }
+
+    /// Rough progress: sizes finished against the four a window is worth.
+    var fractionDone: Double? {
+        guard let w = window else { return nil }
+        let done = rows.filter { $0.window == w }.count
+        return min(1, Double(done) / 4)
     }
 }
 
@@ -904,6 +1071,101 @@ struct MonitorSample: Identifiable {
     var freePercent: Double?
 }
 
+/// Kept out of the big view body: the type checker gives up on long table literals.
+struct WindowCostTable: View {
+    var rows: [BudgetTables.WindowRow]
+    var body: some View {
+        GroupBox("What each window would cost on this machine") {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("window").frame(width: 90, alignment: .leading)
+                    Text("with the conversation kept").frame(width: 200, alignment: .leading)
+                    Text("with retention off").frame(width: 180, alignment: .leading)
+                }.font(.caption).foregroundStyle(.secondary)
+                ForEach(rows) { row in
+                    HStack {
+                        Text(row.window.formatted()).frame(width: 90, alignment: .leading).monospacedDigit()
+                        Text(row.fullText).foregroundStyle(row.fitsFull ? Color.primary : Color.red)
+                            .frame(width: 200, alignment: .leading)
+                        Text(row.noneText).foregroundStyle(row.fitsNone ? Color.primary : Color.red)
+                            .frame(width: 180, alignment: .leading)
+                    }.font(.callout)
+                }
+                Text("Every context token costs 27,648 bytes wherever it appears, so with the whole "
+                    + "conversation kept each 1,000 tokens of window costs about 0.11 GB.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct MachineTable: View {
+    var rows: [BudgetTables.MachineRow]
+    var body: some View {
+        GroupBox("What a different machine would do") {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("RAM").frame(width: 70, alignment: .leading)
+                    Text("memory target").frame(width: 120, alignment: .leading)
+                    Text("largest window").frame(width: 130, alignment: .leading)
+                    Text("expert cache").frame(width: 120, alignment: .leading)
+                }.font(.caption).foregroundStyle(.secondary)
+                ForEach(rows) { m in
+                    HStack {
+                        Text("\(m.ramGB) GB").frame(width: 70, alignment: .leading)
+                        Text(String(format: "%.1f GB", m.targetGB)).frame(width: 120, alignment: .leading)
+                        Text(m.windowText).frame(width: 130, alignment: .leading)
+                        Text(m.cacheText).frame(width: 120, alignment: .leading)
+                    }.font(.callout).monospacedDigit()
+                }
+                Text("Above 65,536 the server refuses the window whatever the memory, so a larger machine "
+                    + "buys a bigger expert cache and speed rather than more context.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct BudgetTables {
+    struct WindowRow: Identifiable {
+        var id: Int { window }
+        var window: Int; var peakFull: Double; var peakNone: Double; var fitsFull: Bool; var fitsNone: Bool
+        var fullText: String { String(format: "%.2f GB %@", peakFull, fitsFull ? "fits" : "does not fit") }
+        var noneText: String { String(format: "%.2f GB %@", peakNone, fitsNone ? "fits" : "does not fit") }
+    }
+    struct MachineRow: Identifiable {
+        var id: Int { ramGB }
+        var ramGB: Int; var targetGB: Double; var largestWindow: Int; var expertsPerLayer: Int
+        var windowText: String { largestWindow == 0 ? "does not fit" : largestWindow.formatted() }
+        var cacheText: String { largestWindow == 0 ? "–" : "\(expertsPerLayer)/layer" }
+    }
+    struct Ledger { var window: Int; var targetGB: Double; var peakGB: Double
+                    var items: [(name: String, gb: Double)] }
+
+    var windows: [WindowRow] = []
+    var machines: [MachineRow] = []
+    var ledger: Ledger?
+
+    init(json o: [String: Any]) {
+        windows = (o["windows"] as? [[String: Any]] ?? []).map {
+            WindowRow(window: $0["window"] as? Int ?? 0, peakFull: $0["peak_full_gb"] as? Double ?? 0,
+                      peakNone: $0["peak_none_gb"] as? Double ?? 0,
+                      fitsFull: $0["fits_full"] as? Bool ?? false, fitsNone: $0["fits_none"] as? Bool ?? false)
+        }
+        machines = (o["machines"] as? [[String: Any]] ?? []).map {
+            MachineRow(ramGB: $0["ram_gb"] as? Int ?? 0, targetGB: $0["target_gb"] as? Double ?? 0,
+                       largestWindow: $0["largest_window"] as? Int ?? 0,
+                       expertsPerLayer: $0["experts_per_layer"] as? Int ?? 0)
+        }
+        if let l = o["ledger"] as? [String: Any] {
+            ledger = Ledger(window: l["window"] as? Int ?? 0, targetGB: l["target_gb"] as? Double ?? 0,
+                            peakGB: l["peak_gb"] as? Double ?? 0,
+                            items: (l["items"] as? [[String: Any]] ?? []).map {
+                                (name: $0["name"] as? String ?? "", gb: $0["gb"] as? Double ?? 0) })
+        }
+    }
+}
+
 struct ExerciserRun: Identifiable {
     var id: Date { ts }
     var ts: Date
@@ -915,4 +1177,7 @@ struct ExerciserRun: Identifiable {
     var decode: Double?
     var expertsBefore: Int?
     var cpuPeak: Double?
+    var label: String = ""
+    var prefill: Double?
+    var errorCode: String?
 }

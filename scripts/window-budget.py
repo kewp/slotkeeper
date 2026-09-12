@@ -195,6 +195,56 @@ def capacity(ram, working_set, percent, pool, chunk, home):
     }
 
 
+def live_ledger():
+    """Where the running server's target actually goes, from /api/show."""
+    import urllib.request
+    port = os.environ.get("SLOTSTREAM_PORT", "11434")
+    model = os.environ.get("SLOTSTREAM_MODEL", "qwen3.8-flash-next:4bit")
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/show",
+                                     data=json.dumps({"name": model}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        plan = json.load(urllib.request.urlopen(req, timeout=10))["details"]["memory_plan"]
+    except Exception:
+        return None
+    ledger = plan.get("memory_ledger", {})
+    items = [
+        ("resident weights and runtime", ledger.get("fixed_bytes")),
+        ("planning margin", 1_000_000_000),
+        ("context state above 32K", ledger.get("additional_active_bytes")),
+        ("long-context transient reserve", ledger.get("long_context_reserve_bytes")),
+        ("prefill workspace", ledger.get("prefill_bytes")),
+        ("retained conversation", (ledger.get("retained_capacity_bytes") or 0)
+            + (ledger.get("retained_recurrent_bytes") or 0)),
+        ("expert cache", ledger.get("pool_bytes")),
+    ]
+    return {"window": plan.get("max_context_tokens"), "target_gb": plan.get("target_gb"),
+            "experts_per_layer": plan.get("experts_per_layer_cached"),
+            "peak_gb": plan.get("expected_peak_gb"),
+            "items": [{"name": n, "gb": round((b or 0) / 1e9, 2)} for n, b in items]}
+
+
+def tables(ram, working_set, percent, pool, chunk):
+    """The comparisons worth seeing: what each window costs here, and what other machines do."""
+    target = target_gb(ram, working_set, percent)
+    windows = []
+    for w in STANDARD_WINDOWS:
+        full, none = peak_gb(w, pool, w, chunk), peak_gb(w, pool, 0, chunk)
+        windows.append({"window": w, "peak_full_gb": round(full, 2), "peak_none_gb": round(none, 2),
+                        "fits_full": full + MARGIN_GB <= target, "fits_none": none + MARGIN_GB <= target})
+    machines = []
+    for size in (16, 24, 32, 64, 128):
+        t = target_gb(size, size * 0.75, percent)
+        biggest = largest_window(t, POOL_FLOOR_GB, chunk, True)
+        # What the expert cache looks like at the largest window that machine can hold.
+        room = t - MARGIN_GB - peak_gb(min(biggest, SERVER_WINDOW_LIMIT), 0, min(biggest, SERVER_WINDOW_LIMIT), chunk)
+        machines.append({"ram_gb": size, "target_gb": round(t, 1),
+                         "largest_window": biggest,
+                         "experts_per_layer": max(13, int(max(0, room) / GB_PER_EXPERT_PER_LAYER))})
+    return {"target_gb": round(target, 2), "windows": windows, "machines": machines,
+            "ledger": live_ledger()}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ram", type=float, help="machine RAM in GB (default: this machine)")
@@ -202,6 +252,8 @@ def main():
     ap.add_argument("--experts", type=int, help="experts per layer to keep cached (default: the floor)")
     ap.add_argument("--chunk", type=int, default=1024, help="prefill chunk (default 1024)")
     ap.add_argument("--window", type=int, help="price this window instead of solving for the largest")
+    ap.add_argument("--tables", action="store_true",
+                    help="ledger, per-window costs and other machines, as JSON for the app")
     ap.add_argument("--capacity", action="store_true",
                     help="what this machine has actually handled, from the recorded tests")
     ap.add_argument("--json", action="store_true")
@@ -212,6 +264,10 @@ def main():
         sys.exit("could not read this machine's memory; pass --ram")
     pool = a.experts * GB_PER_EXPERT_PER_LAYER if a.experts else POOL_FLOOR_GB
     target = target_gb(ram, working_set, a.percent)
+
+    if a.tables:
+        print(json.dumps(tables(ram, working_set, a.percent, pool, a.chunk), indent=2))
+        return
 
     if a.capacity:
         home = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))

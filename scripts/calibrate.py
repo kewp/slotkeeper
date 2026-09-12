@@ -35,6 +35,7 @@ RESULT = os.path.join(HOME, "calibration.json")
 CTL = os.path.join(REPO, "scripts", "slotkeeper")
 ACTIVE = os.path.join(HOME, "opencode-active")
 PAUSE = os.path.join(HOME, "calibrate.pause")
+PROGRESS = os.path.join(HOME, "calibration.progress.json")
 JOBS = os.path.join(HOME, "jobs", "running")
 STALE_DAYS = 30
 IDLE_MINUTES = 30       # how long you must be away before it takes the server
@@ -147,6 +148,34 @@ def auto(args):
             time.sleep(3600)
 
 
+def progress(**fields):
+    """Publish what calibration is doing right now, so the app can show it live."""
+    state = {}
+    if os.path.exists(PROGRESS):
+        try:
+            with open(PROGRESS) as f:
+                state = json.load(f)
+        except ValueError:
+            state = {}
+    state.update(fields)
+    state["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        tmp = PROGRESS + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, PROGRESS)
+    except OSError:
+        pass
+
+
+def clear_progress():
+    try:
+        os.remove(PROGRESS)
+    except OSError:
+        pass
+
+
 def measure(exerciser, size, label):
     """One real request at about `size` prompt tokens. Returns a row, never raises."""
     prompt, est, files = exerciser.build_codebase_prompt(size)
@@ -177,8 +206,11 @@ def run(args):
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     attempts = []
     chosen = None
+    progress(started=started, windows=windows, fractions=list(fractions), rows=[],
+             phase="starting", window=None, size=None)
     for window in windows:
         print(f"\n=== window {window:,}: restarting the server", flush=True)
+        progress(window=window, phase="restarting the server at this window", size=None)
         out = ctl("restart", str(window))
         if out.returncode != 0:
             print(out.stderr.strip()[-300:], file=sys.stderr)
@@ -188,8 +220,13 @@ def run(args):
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
             print(f"  {size:,} tokens…", end=" ", flush=True)
+            progress(window=window, size=size, phase="sending a prompt of this size",
+                     size_started=datetime.now(timezone.utc).isoformat(timespec="seconds"))
             row = measure(exerciser, size, f"calibrate-{window}")
             rows.append(row)
+            done = (progress_rows() + [{"window": window, "size": size, "ok": row["ok"],
+                                        "ttft_s": row.get("ttft_s"), "error": row.get("error")}])
+            progress(rows=done, size=None, phase="between sizes")
             print(("ok " + (f"{row['ttft_s']:.0f} s to first token" if row["ttft_s"] else ""))
                   if row["ok"] else f"failed ({row['error']})", flush=True)
             if not row["ok"] and row["error"] == "insufficient_memory":
@@ -208,6 +245,7 @@ def run(args):
 
     if chosen is None:
         print("no window carried a prompt; is the server healthy?", file=sys.stderr)
+        progress(phase="no window carried a prompt", size=None)
         return 1
 
     good = [r for r in chosen["rows"] if r["ok"] and r.get("prompt_tokens")]
@@ -252,8 +290,19 @@ def run(args):
         json.dump(result, f, indent=2)
     os.replace(tmp, RESULT)
     ctl("profile", str(chosen["window"]))   # keep what we settled on across restarts
+    clear_progress()
     show(result)
     return 0
+
+
+def progress_rows():
+    if not os.path.exists(PROGRESS):
+        return []
+    try:
+        with open(PROGRESS) as f:
+            return json.load(f).get("rows", [])
+    except ValueError:
+        return []
 
 
 def _machine():
