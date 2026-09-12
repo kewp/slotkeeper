@@ -357,7 +357,11 @@ def targets_to_try(ram, working_set, args):
     own ceiling, so a large machine is measured at what it really has."""
     if args.memory_gb:
         return [args.memory_gb]
-    top = min(working_set - 2.0, ram * 0.9)
+    # Do not pre-decide what the machine can spare. Start near all of it and let the
+    # server's own refusal say where the ceiling is: that refusal is the measurement.
+    # The Metal working set is a bound the planner applies itself, and a target above it
+    # is worth trying precisely because nobody here should guess it.
+    top = ram * 0.95
     out = []
     value = top
     while value >= MIN_TARGET_GB:
@@ -394,7 +398,8 @@ def search(args):
     fractions = (0.25, 0.5, 0.75) if args.quick else (0.25, 0.5, 0.75, 0.9)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows, notes = [], []
-    progress(started=started, windows=windows, rows=[], phase="starting", window=None, size=None)
+    progress(started=started, windows=windows, rows=[], attempts=[], phase="starting",
+             window=None, size=None, target_gb=None)   # a fresh run shows nothing stale
 
     # 1. How much of this machine can the server actually use? Take the most generous
     #    target that serves a middling prompt without a memory failure or critical pressure.
@@ -550,12 +555,26 @@ def search(args):
 
 
 def _machine():
+    """RAM and the Metal working set. The server reports the real working set; the
+    three-quarters estimate is only a fallback for when it is not running."""
     try:
         ram = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
                                  timeout=5).stdout.strip()) / 1e9
     except (OSError, ValueError, subprocess.SubprocessError):
         ram = 16.0
-    return ram, ram * 0.75
+    working_set = None
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{os.environ.get('SLOTSTREAM_PORT', '11434')}/api/show",
+            data=json.dumps({"name": os.environ.get("SLOTSTREAM_MODEL", "qwen3.8-flash-next:4bit")}).encode(),
+            headers={"Content-Type": "application/json"})
+        plan = json.load(urllib.request.urlopen(req, timeout=10))["details"]["memory_plan"]
+        working_set = plan.get("device_working_set_gb")
+        ram = plan.get("device_ram_gb") or ram
+    except Exception:
+        pass
+    return ram, working_set or ram * 0.75
 
 
 def _machine_description():
