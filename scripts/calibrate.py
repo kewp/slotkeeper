@@ -376,6 +376,11 @@ def restart(window, target_gb, retention=None, chunk=None, slack=None, working_s
 RESTART_REASON = {"why": None}
 
 
+def on_battery():
+    return "discharging" in subprocess.run(["pmset", "-g", "batt"], capture_output=True,
+                                           text=True).stdout
+
+
 def critical_pressure():
     level = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
                            capture_output=True, text=True).stdout.strip()
@@ -465,7 +470,12 @@ def search(args):
     # Try past the qualified envelope too: with the window patch the server accepts it and
     # the planner refuses what does not fit, so the machine decides rather than a constant.
     windows = [args.window] if args.window else [262_144, 196_608, 131_072, 98_304, 65_536, 49_152, 32_768, 16_384]
-    fractions = (0.25, 0.5, 0.75) if args.quick else (0.25, 0.5, 0.75, 0.9)
+    if args.max_window:
+        windows = [w for w in windows if w <= args.max_window] or [args.max_window]
+    # Acceptance needs a prompt at about three quarters of the window, so ask that first:
+    # if it fails there is no point spending half an hour on the smaller sizes, and if it
+    # succeeds the window is already accepted. Smaller sizes only fill in the curve.
+    fractions = (0.75,) if args.quick else (0.75, 0.5, 0.9)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows, notes = [], []
     progress(started=started, windows=windows, rows=[], attempts=[], phase="starting",
@@ -531,6 +541,9 @@ def search(args):
         if rung is not LADDER[0]:
             print(f"  started by giving up {rung['gives_up']}", flush=True)
         here = []
+        if on_battery():
+            print("on battery: stopping here and restoring a working configuration", flush=True)
+            break
         for fraction in fractions:
             size = int(window * fraction) // 1000 * 1000
             print(f"  {size:,} tokens…", end=" ", flush=True)
@@ -558,6 +571,8 @@ def search(args):
                     continue
         good = [r for r in here if r["ok"] and r.get("prompt_tokens")]
         largest_here = max((r["prompt_tokens"] for r in good), default=0)
+        if largest_here >= window * 0.7:
+            print(f"  {window:,} carries {largest_here:,} tokens — accepted", flush=True)
         note_attempt(kind="window", window=window, target_gb=target,
                      result=(f"carried {largest_here:,} tokens" if largest_here else "carried nothing")
                             + (" — accepted" if largest_here >= window * 0.7 else ""))
@@ -726,6 +741,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--window", type=int)
+    ap.add_argument("--max-window", type=int, dest="max_window",
+                    help="do not try windows above this, when time is short")
     # The cap the server will actually use, so the windows we try are ones it can plan.
     ap.add_argument("--percent", type=float,
                     default=float(os.environ.get("SLOTSTREAM_MAX_RAM_PERCENT", "70")))
