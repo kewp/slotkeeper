@@ -419,7 +419,7 @@ def restart(window, target_gb, retention=None, chunk=None, slack=None, working_s
             log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
                         retention=retention or "default", ok=False, reason=why)
             return False
-        LAST_GOOD["config"] = (window, target_gb, retention, chunk)
+        LAST_GOOD["config"] = (window, target_gb, retention, chunk, slack, working_set)
         log_attempt(kind="start", window=window, target_gb=target_gb, chunk=chunk or "default",
                     retention=retention or "default", ok=True, reason="server started")
         return True
@@ -493,6 +493,11 @@ def run(args):
     # An interrupted search must not leave settings that will not load: treat a stop
     # signal as a normal exit so the restore below always runs.
     for sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+        # Started under nohup (or anything else that ignores hangups), a closed terminal
+        # is not a request to stop. Overriding that disposition is how an overnight run
+        # died on 2026-09-12 in the middle of a probe.
+        if sig == _signal.SIGHUP and _signal.getsignal(sig) == _signal.SIG_IGN:
+            continue
         _signal.signal(sig, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     try:
         return search(args)
@@ -503,21 +508,50 @@ def run(args):
         # An interrupted search must not leave the app claiming it is still measuring:
         # clear_progress() otherwise only runs when a run settles.
         clear_progress()
+        # A second signal must not abandon the restore half way.
+        for sig in (_signal.SIGTERM, _signal.SIGINT, _signal.SIGHUP):
+            _signal.signal(sig, _signal.SIG_IGN)
         good = LAST_GOOD.get("config")
         if good and LAST_GOOD.get("dirty"):
-            print(f"restoring the last working configuration: {good[0]:,} at "
-                  + (f"{good[1]:.1f} GB" if good[1] else "auto"), flush=True)
-            if not restart(*good):
-                # Even the last good configuration can fail once memory has moved on;
-                # fall back to settings that always load rather than leaving nothing.
-                print("the last working configuration no longer starts; using defaults", flush=True)
-                restart(32_768, None, None, None, None)
-                ctl("profile", "32768")
-            else:
-                ctl("profile", str(good[0]))
+            restore(good)
 
 
 LAST_GOOD = {"config": None, "dirty": False}
+
+
+def restore(good):
+    """Leave the machine serving, degrading rather than giving up.
+
+    The last good configuration can be refused a few minutes later because reclaimable
+    memory moved (on 2026-09-12 it fell 0.7 GB and crossed the planner's 1.5 GB headroom).
+    So walk the same ladder the search walks, at the same window and target, before
+    dropping to defaults. The working-set rungs are left out: a server someone relies on
+    should not run past Metal's recommendation unless a probe has shown it is worth it."""
+    window, target = good[0], good[1]
+    print(f"restoring the last working configuration: {window:,} at "
+          + (f"{target:.1f} GB" if target else "auto"), flush=True)
+    if restart(*good):
+        ctl("profile", str(window))
+        return True
+    tried = tuple(good[2:])
+    for candidate in LADDER:
+        if candidate.get("working_set"):
+            continue
+        rung = (candidate["retention"], candidate["chunk"], candidate.get("slack"), None)
+        if rung == tried:
+            continue
+        print(f"  giving up {candidate['gives_up']}", flush=True)
+        if restart(window, target, *rung):
+            ctl("profile", str(window))
+            return True
+    print("nothing on the ladder starts there; using defaults", flush=True)
+    if restart(32_768, None, None, None, None, None):
+        ctl("profile", "32768")
+        return True
+    # Last resort: the supervisor's own fallback, which strips every experimental knob.
+    print("defaults would not start either; handing over to the supervisor's fallback", flush=True)
+    out = subprocess.run(["bash", CTL, "start", "32768"], capture_output=True, text=True, timeout=900)
+    return out.returncode == 0
 
 
 def search(args):
