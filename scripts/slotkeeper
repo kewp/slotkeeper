@@ -30,6 +30,7 @@
 #   calibrate [--quick|--show|--window N]   Measure what this machine handles and write the verdict
 #                       to ~/.slotstream/calibration.json (restarts the server; not while you work).
 #   capacity [--window N|--ram N]           What a window costs in memory, from the planner's ledger.
+#   verdict [--json]    What this machine can and cannot do, judged from recorded measurements.
 #   exerciser <start|stop|pause [reason]|resume|status|report>
 #                       Background task suite as a LaunchAgent (local.slotkeeper-exerciser).
 #
@@ -535,6 +536,7 @@ case "${1:-}" in
       *) exec "$SCRIPT_DIR/calibrate.py" "${@:2}" ;;
     esac ;;
   capacity) exec "$SCRIPT_DIR/window-budget.py" "${@:2}" ;;
+  verdict) exec /usr/bin/env python3 "$SCRIPT_DIR/verdict.py" "${@:2}" ;;
   exerciser) cmd_exerciser "${2:-status}" "${@:3}" ;;
   -h|--help|help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

@@ -25,6 +25,8 @@ struct DashboardView: View {
     @State private var liveExpanded = false
     @State private var selectedRequest: OpenCodeRequest.ID?
     @State private var calibration: Calibration?
+    @State private var verdict: Verdict?
+    @State private var verdictLoading = false
     @State private var calibrating = false
     @State private var autoCalibrationStopped = false
     @State private var calibrationNote: String?
@@ -47,7 +49,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 20).padding(.top, 16)
             TabView {
-                ScrollView { VStack(alignment: .leading, spacing: 18) { capacityCard; live; overview }.padding(20) }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { VerdictPanel(verdict: verdict, loading: verdictLoading); live; overview }.padding(20) }
                     .tabItem { Text("Overview") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { capacityTab }.padding(20) }
                     .tabItem { Text("Capacity") }
@@ -71,6 +73,10 @@ struct DashboardView: View {
         // Calibration publishes what it is doing; while it runs, follow it closely.
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             loadCalibration()
+        }
+        // The verdict moves as tests land; once a minute is plenty and keeps the script cheap.
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            loadVerdict()
         }
         // While a request is running, refresh the table often enough to watch turns land,
         // and leave it alone when the server is idle: each reload spawns report.py.
@@ -227,7 +233,7 @@ struct DashboardView: View {
                         }
                         Spacer()
                     }
-                    if let limit = c.limitedBy {
+                    if let limit = c.limitedBy, !limit.contains("65,536") {
                         Text("limited by " + limit).font(.callout).foregroundStyle(.secondary)
                     }
                     Text(c.provenance).font(.caption).foregroundStyle(.secondary)
@@ -789,7 +795,11 @@ struct DashboardView: View {
 
     static func runScript(_ name: String, _ args: [String]) -> String {
         let dir = URL(fileURLWithPath: reportPath).deletingLastPathComponent()
-        return shell("/bin/bash", [dir.appendingPathComponent(name).path] + args)
+        let path = dir.appendingPathComponent(name).path
+        // bash cannot run a Python file: it failed on the docstring, so every .py called
+        // through here (window-budget.py) returned nothing and its tables stayed empty.
+        if name.hasSuffix(".py") { return shell("/usr/bin/env", ["python3", path] + args) }
+        return shell("/bin/bash", [path] + args)
     }
 
     /// Unattended tasks: what is waiting, what ran, and a way to add one without the terminal.
@@ -876,7 +886,26 @@ struct DashboardView: View {
         let s = v.sorted(); return s[s.count / 2]
     }
 
+    /// What this Mac can and cannot do, judged by scripts/verdict.py from recorded evidence.
+    /// Off the main thread: it asks the server for its plan and can wait up to three seconds.
+    private func loadVerdict() {
+        let script = URL(fileURLWithPath: DashboardView.reportPath).deletingLastPathComponent()
+            .appendingPathComponent("verdict.py").path
+        if verdict == nil { verdictLoading = true }
+        DispatchQueue.global(qos: .utility).async {
+            let out = DashboardView.shell("/usr/bin/env", ["python3", script, "--json"])
+            let parsed = out.data(using: .utf8)
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                .map(Verdict.init(json:))
+            DispatchQueue.main.async {
+                if let parsed { verdict = parsed }
+                verdictLoading = false
+            }
+        }
+    }
+
     private func load() {
+        loadVerdict()
         let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream/metrics")
         let since = Date().addingTimeInterval(-hours * 3600)
         let iso = ISO8601DateFormatter()

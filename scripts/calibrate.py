@@ -723,8 +723,12 @@ def search(args):
         f"up to {result['comfortable_prompt']:,}-token prompts at a {result['window']:,} window"
         + (f", about {result['ttft_median_s']:.0f} s to the first token" if result["ttft_median_s"] else "")
         + (f", {result['decode_median_tok_s']:.1f} tok/s generating" if result["decode_median_tok_s"] else ""))
-    if chosen_window >= 65_536:
-        result["limited_by"] = "the server's 65,536-token limit — the next gain has to come from Slotstream"
+    # Say what actually stopped the search. The 65,536 window cap this used to blame was
+    # lifted by patch six; what stops a larger window now is the memory target.
+    refused = [n for n in notes if n.startswith("window ") and "nothing left to give up" in n]
+    if refused:
+        result["limited_by"] = (f"memory: larger windows would not start at a {target:.1f} GB target, "
+                                "which is what this machine had free when measured")
     elif failed:
         result["limited_by"] = f"memory during long prefills, at a {target:.1f} GB target"
     else:

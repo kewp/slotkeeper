@@ -129,6 +129,15 @@ ttft_at_largest_s, prefill_median_tok_s, decode_median_tok_s, machine,
 ram_percent, measured_at, finished_at, attempts[]`. The app's headline card
 reads it directly; `calibrate.pause` stops the automatic runs.
 
+`scripts/verdict.py --json` (also `slotkeeper verdict`) is the judged answer the
+Overview tab opens on: `headline, machine, settings{window, memory_gb,
+keeps_tokens, since, server_running}, can[], cannot[], untested[], your_use`.
+Each item has `title, detail, evidence`; a `cannot` item adds `why`, `fix` and
+`kind` (`setting`, `memory`, `hardware`, `unknown`). It reads calibration,
+calibration attempts, exerciser runs since the newest change to `ctl.env`,
+`profile` or `calibration.json`, OpenCode turns and `/api/show`. All judging
+lives in the script; the app only renders it.
+
 ### 1.7 `exerciser.pause`
 
 Presence means paused; contents are the reason. Created by
@@ -228,6 +237,13 @@ back when the Dock icon is clicked.
   `metrics/*.jsonl` and `exerciser.jsonl` on appear and on window change,
   renders Swift Charts (cache/pressure timeline, TTFT by prompt size, decode by
   cache size), a `Table` of recent runs, and a per-task summary.
+- `Sources/Slotkeeper/Verdict.swift`: `Verdict` (parsed `verdict.py --json`)
+  and `VerdictPanel`, the large can/can't display at the top of Overview.
+  `DashboardView.loadVerdict()` runs the script off the main thread on load
+  and once a minute.
+- `DashboardView.runScript` runs `.py` files with `python3`: through bash they
+  failed silently, which left the Capacity tab's budget tables empty until
+  2026-09-14.
 - Build/run: `swift build`, `swift run` for a dev instance (kill the launchd
   one first with `slotkeeper bar uninstall`, reinstall after).
 
