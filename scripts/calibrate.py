@@ -16,6 +16,7 @@ Usage:
   calibrate.py --quick         one prompt per window instead of three
   calibrate.py --window 32768  test one window only
   calibrate.py --show          print the last calibration without measuring
+  calibrate.py --plan          print what a run would try on the installed server, and stop
   calibrate.py --auto          keep the answer current on its own: waits until you are away,
                                measures when there is no valid calibration, then rechecks hourly
                                (stop it with ~/.slotstream/calibrate.pause, or from the app)
@@ -395,6 +396,87 @@ LADDER = [
 ]
 
 
+def binary_knobs(exe=None):
+    """Which of the ladder's settings the installed server honours, asked of the binary.
+
+    0.2.14 carried patches for retention, headroom and working set; 0.2.25 has none of them
+    (it sizes retention itself and keeps conversations on disk), so there those settings
+    changed nothing and every rung was the same server recorded as a different one. 0.2.25
+    does have an adaptive memory ceiling, which is how the measured target is kept."""
+    exe = exe or os.path.join(HOME, "bin", "slotstream")
+    try:
+        dump = subprocess.run(["strings", exe], capture_output=True, text=True, timeout=120).stdout
+        serve = subprocess.run([exe, "serve", "--help"], capture_output=True, text=True, timeout=30)
+        serve_help = serve.stdout + serve.stderr
+    except (OSError, subprocess.SubprocessError):
+        dump = serve_help = ""
+    return {"retention": "SLOTSTREAM_PREFIX_CACHE_TOKENS" in dump,
+            "chunk": "SLOTSTREAM_PREFILL_CHUNK" in dump,
+            "slack": "SLOTSTREAM_AVAILABILITY_SLACK_GB" in dump,
+            "working_set": "SLOTSTREAM_WORKING_SET_GB" in dump,
+            "memory_limit": "--memory-limit-gb" in serve_help}
+
+
+_KNOBS = {}
+
+
+def knobs():
+    if not _KNOBS:
+        _KNOBS.update(binary_knobs())
+    return _KNOBS
+
+
+def gives_up(rung, k=None):
+    """What a rung trades, in words, naming only what it actually sets."""
+    k = k or knobs()
+    parts = []
+    if rung["retention"] == "32768":
+        parts.append("keeping only 32,768 tokens of conversation")
+    elif rung["retention"] is None and k["retention"]:
+        parts.append("all but the server's own small retention")
+    if rung["chunk"]:
+        parts.append(f"a {int(rung['chunk']):,}-token prefill pass")
+    if rung["slack"]:
+        parts.append(f"safety headroom down to {rung['slack']} GB")
+    if rung["working_set"]:
+        parts.append(f"{rung['working_set'].lstrip('+')} GB past Metal's recommended working set")
+    return ", ".join(parts) or "nothing"
+
+
+def rungs(k=None):
+    """LADDER with the settings this binary ignores taken out, and the rungs that then
+    repeat an earlier one dropped. On 0.2.25 that leaves the prefill pass size alone."""
+    k = k or knobs()
+    out, seen = [], set()
+    for rung in LADDER:
+        r = {"retention": rung["retention"] if k["retention"] else None,
+             "chunk": rung["chunk"] if k["chunk"] else None,
+             "slack": rung.get("slack") if k["slack"] else None,
+             "working_set": rung.get("working_set") if k["working_set"] else None}
+        key = tuple(r.values())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({**r, "gives_up": gives_up(r, k)})
+    return out
+
+
+def settle_memory(window, target):
+    """Keep the measured target as an adaptive ceiling where the server has one: it starts at
+    what is free and gives memory back to other apps, instead of holding a pinned target.
+    True when the server came up that way."""
+    if not (target and knobs()["memory_limit"]):
+        return False
+    set_env("SLOTSTREAM_MEMORY_GB", None)
+    set_env("SLOTSTREAM_MEMORY_LIMIT_GB", f"{target:.1f}")
+    if ctl("restart", str(window)).returncode == 0:
+        print(f"  kept {target:.1f} GB as an adaptive ceiling", flush=True)
+        return True
+    print("  the ceiling would not start; keeping the pinned target", flush=True)
+    set_env("SLOTSTREAM_MEMORY_LIMIT_GB", None)
+    return False
+
+
 def restart(window, target_gb, retention=None, chunk=None, slack=None, working_set=None):
     """Bring the server up at one configuration. False when it will not start there.
 
@@ -402,11 +484,17 @@ def restart(window, target_gb, retention=None, chunk=None, slack=None, working_s
     or None for the server's own default. It is a dimension of the search, not a
     setting we inherit: a large window with a full conversation reserved can fail to
     start where the same window with less retention runs fine."""
+    k = knobs()
+    # The search measures pinned targets. A ceiling in ctl.env would be passed instead of
+    # them (slotkeeper serve_args), so every "target" would silently be the ceiling.
+    if k["memory_limit"]:
+        set_env("SLOTSTREAM_MEMORY_LIMIT_GB", None)
     set_env("SLOTSTREAM_MEMORY_GB", f"{target_gb:.1f}" if target_gb else None)
-    set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention)
-    set_env("SLOTSTREAM_PREFILL_CHUNK", chunk)
-    set_env("SLOTSTREAM_AVAILABILITY_SLACK_GB", slack)
-    set_env("SLOTSTREAM_WORKING_SET_GB", working_set_value(working_set))
+    # A setting the binary ignores is not written at all, so ctl.env says what is in force.
+    set_env("SLOTSTREAM_PREFIX_CACHE_TOKENS", retention if k["retention"] else None)
+    set_env("SLOTSTREAM_PREFILL_CHUNK", chunk if k["chunk"] else None)
+    set_env("SLOTSTREAM_AVAILABILITY_SLACK_GB", slack if k["slack"] else None)
+    set_env("SLOTSTREAM_WORKING_SET_GB", working_set_value(working_set) if k["working_set"] else None)
     LAST_GOOD["dirty"] = True
     out = ctl("restart", str(window))
     if out.returncode == 0:
@@ -532,9 +620,10 @@ def restore(good):
           + (f"{target:.1f} GB" if target else "auto"), flush=True)
     if restart(*good):
         ctl("profile", str(window))
+        settle_memory(window, target)
         return True
     tried = tuple(good[2:])
-    for candidate in LADDER:
+    for candidate in rungs():
         if candidate.get("working_set"):
             continue
         rung = (candidate["retention"], candidate["chunk"], candidate.get("slack"), None)
@@ -543,6 +632,7 @@ def restore(good):
         print(f"  giving up {candidate['gives_up']}", flush=True)
         if restart(window, target, *rung):
             ctl("profile", str(window))
+            settle_memory(window, target)
             return True
     print("nothing on the ladder starts there; using defaults", flush=True)
     if restart(32_768, None, None, None, None, None):
@@ -554,6 +644,40 @@ def restore(good):
     return out.returncode == 0
 
 
+def windows_for(args):
+    """Windows to try, largest first. The server takes any window up to the model's 262,144
+    (0.2.17+, or 0.2.14 with the window patch) and the planner refuses what does not fit,
+    so the machine decides rather than a constant."""
+    windows = [args.window] if args.window else [262_144, 196_608, 131_072, 98_304, 65_536, 49_152, 32_768, 16_384]
+    if args.max_window:
+        windows = [w for w in windows if w <= args.max_window] or [args.max_window]
+    return windows
+
+
+def server_version():
+    try:
+        return subprocess.run([os.path.join(HOME, "bin", "slotstream"), "--version"],
+                              capture_output=True, text=True, timeout=30).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def plan(args):
+    """What a run would try on the installed server, without touching it."""
+    k = knobs()
+    ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
+    print(f"server {server_version() or '?'}; settings it honours: "
+          + ", ".join(n for n, on in k.items() if on))
+    print("memory targets, most generous first: "
+          + ", ".join(f"{t:.1f} GB" for t in targets_to_try(ram, working_set, args)))
+    print("then kept as " + ("an adaptive ceiling" if k["memory_limit"] else "a pinned target"))
+    print("windows, largest first: " + ", ".join(f"{w:,}" for w in windows_for(args)))
+    print("what it gives up to make a window start, in order:")
+    for i, r in enumerate(rungs(k)):
+        print(f"  {i + 1}. {r['gives_up']}")
+    return 0
+
+
 def search(args):
     exerciser = load("exerciser")
     # A share someone picked by hand is not evidence, and it must not come back if this
@@ -563,11 +687,8 @@ def search(args):
               "the measurement decides the target", flush=True)
         set_env("SLOTSTREAM_MAX_RAM_PERCENT", None)
     ram, working_set = (args.ram, args.ram * 0.75) if args.ram else _machine()
-    # Try past the qualified envelope too: with the window patch the server accepts it and
-    # the planner refuses what does not fit, so the machine decides rather than a constant.
-    windows = [args.window] if args.window else [262_144, 196_608, 131_072, 98_304, 65_536, 49_152, 32_768, 16_384]
-    if args.max_window:
-        windows = [w for w in windows if w <= args.max_window] or [args.max_window]
+    windows = windows_for(args)
+    RUNGS = rungs()
     # Acceptance needs a prompt at about three quarters of the window, so ask that first:
     # if it fails there is no point spending half an hour on the smaller sizes, and if it
     # succeeds the window is already accepted. Smaller sizes only fill in the curve.
@@ -583,7 +704,7 @@ def search(args):
     # How much conversation to keep, most generous first. A window that will not start
     # with the whole conversation kept often starts with less, and keeping less costs
     # one re-prefill rather than the window itself.
-    retentions = ["full", "32768", None]
+    retentions = ["full", "32768", None] if knobs()["retention"] else [None]
     target = None
     for candidate in targets_to_try(ram, working_set, args):
         print(f"\n=== trying a {candidate:.1f} GB memory target", flush=True)
@@ -623,7 +744,7 @@ def search(args):
         # Walk the ladder: give up the cheapest thing first, and only reject the window
         # when there is nothing left to give up.
         rung = None
-        for candidate in LADDER:
+        for candidate in RUNGS:
             if restart(window, target, candidate["retention"], candidate["chunk"],
                        candidate.get("slack"), candidate.get("working_set")):
                 rung = candidate
@@ -634,7 +755,7 @@ def search(args):
             notes.append(f"window {window:,}: nothing left to give up at {target:.1f} GB")
             continue
         started_here = rung["retention"]
-        if rung is not LADDER[0]:
+        if rung is not RUNGS[0]:
             print(f"  started by giving up {rung['gives_up']}", flush=True)
         here = []
         if on_battery():
@@ -649,7 +770,7 @@ def search(args):
                 # The prompt, not the plan, ran out of memory. Step down the ladder and
                 # try the same size again before giving up on this window.
                 retried = False
-                for candidate in LADDER[LADDER.index(rung) + 1:]:
+                for candidate in RUNGS[RUNGS.index(rung) + 1:]:
                     print(f"  giving up {candidate['gives_up']} and retrying {size:,}…",
                           end=" ", flush=True)
                     if not restart(window, target, candidate["retention"], candidate["chunk"],
@@ -692,6 +813,7 @@ def search(args):
             os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB"),
             os.environ.get("SLOTSTREAM_WORKING_SET_GB"))
     ctl("profile", str(chosen_window))
+    adaptive = settle_memory(chosen_window, target)
     LAST_GOOD["dirty"] = False
 
     good = [r for r in window_rows if r["ok"] and r.get("prompt_tokens")]
@@ -704,10 +826,16 @@ def search(args):
         "measured_at": started, "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "window": chosen_window,
         "memory_target_gb": target,
-        "retention": chosen_retention or "the server's default",
+        "memory_mode": "adaptive ceiling" if adaptive else "pinned",
+        "server_version": server_version(),
+        "retention": (chosen_retention or "the server's default") if knobs()["retention"]
+                     else "the server's own" + (", conversations also kept on disk"
+                                                 if os.environ.get("SLOTSTREAM_PREFIX_CACHE_DIR") else ""),
         "prefill_chunk": os.environ.get("SLOTSTREAM_PREFILL_CHUNK", "default"),
-        "availability_slack_gb": os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB", "default"),
-        "working_set_gb": os.environ.get("SLOTSTREAM_WORKING_SET_GB", "Metal's recommendation"),
+        "availability_slack_gb": os.environ.get("SLOTSTREAM_AVAILABILITY_SLACK_GB", "default")
+                                 if knobs()["slack"] else "not settable in this build",
+        "working_set_gb": os.environ.get("SLOTSTREAM_WORKING_SET_GB", "Metal's recommendation")
+                          if knobs()["working_set"] else "Metal's recommendation (not settable in this build)",
         "largest_prompt_ok": largest,
         "comfortable_prompt": int(largest * 0.8) // 1000 * 1000,
         "first_failure_at": min([r["requested_tokens"] for r in failed], default=None),
@@ -724,7 +852,8 @@ def search(args):
         + (f", about {result['ttft_median_s']:.0f} s to the first token" if result["ttft_median_s"] else "")
         + (f", {result['decode_median_tok_s']:.1f} tok/s generating" if result["decode_median_tok_s"] else ""))
     # Say what actually stopped the search. The 65,536 window cap this used to blame was
-    # lifted by patch six; what stops a larger window now is the memory target.
+    # lifted by patch six on 0.2.14 and is gone upstream from 0.2.17; what stops a larger
+    # window now is the memory target.
     refused = [n for n in notes if n.startswith("window ") and "nothing left to give up" in n]
     if refused:
         result["limited_by"] = (f"memory: larger windows would not start at a {target:.1f} GB target, "
@@ -850,6 +979,8 @@ def main():
     ap.add_argument("--memory-gb", type=float, dest="memory_gb",
                     help="skip the memory search and measure at this total target")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--plan", action="store_true",
+                    help="print what a run would try on the installed server, and stop")
     ap.add_argument("--progress", action="store_true",
                     help="what the measurement running right now has found so far")
     ap.add_argument("--auto", action="store_true",
@@ -858,6 +989,8 @@ def main():
     a = ap.parse_args()
     if a.show:
         return show()
+    if a.plan:
+        return plan(a)
     if a.progress:
         return live()
     if a.auto:

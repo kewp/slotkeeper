@@ -15,6 +15,14 @@ is a constant someone chose, and this project has already changed seven of them.
 
 ## Searched
 
+Which of these a run can search depends on the installed server, and calibration asks the
+binary rather than assuming (`calibrate.py --plan` prints it). The patched 0.2.14 honours
+retention, headroom and working set; 0.2.25 honours none of them (it sizes retention itself
+and keeps conversations on disk), so on 0.2.25 the ladder is the prefill pass alone, and the
+measured target is kept as an adaptive ceiling (`--memory-limit-gb`) rather than a pin.
+Before 2026-09-26 calibration wrote every setting regardless, and on 0.2.25 a ceiling in
+`ctl.env` would have been passed in place of each pinned target it thought it was measuring.
+
 | Limit | Where | How it is searched |
 | --- | --- | --- |
 | Total memory target | `SLOTSTREAM_MEMORY_GB` → `--memory-gb` | From 95% of RAM downward until one serves a prompt without a memory failure or critical pressure. Overrides auto's 33 GB model ceiling and is deliberately not capped by the Metal working set: the server's refusal is the measurement, not our guess. |
