@@ -7,7 +7,7 @@ import SwiftUI
 /// nothing is left listening, so the Dock icon did nothing at all. An AppKit window the
 /// delegate keeps a reference to can always be brought back.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static private(set) var shared: AppDelegate?
     private var dashboard: NSWindow?
 
@@ -58,7 +58,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
+    /// In the Dock only while the window is open: closing it leaves just the menu-bar item,
+    /// and opening it again (menu, Spotlight, Finder) brings the Dock icon back.
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === dashboard else { return }
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+
     func showDashboard() {
+        NSApplication.shared.setActivationPolicy(.regular)
         if let window = dashboard {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -72,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentViewController = NSHostingController(rootView: DashboardView(status: .shared))
         window.setFrameAutosaveName("SlotkeeperDashboard")
         window.isReleasedWhenClosed = false   // closing must not destroy it; it reopens
+        window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -89,8 +98,9 @@ struct SlotkeeperApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
-        // A real app: Dock icon, Cmd-Tab, a Window menu. The menu bar item stays.
-        NSApplication.shared.setActivationPolicy(.regular)
+        // Menu bar only until the dashboard opens; showDashboard adds the Dock icon, Cmd-Tab
+        // and the Window menu, and closing the window takes them away again.
+        NSApplication.shared.setActivationPolicy(.accessory)
     }
 
     var body: some Scene {
