@@ -48,6 +48,8 @@
 #   SLOTSTREAM_MAX_RAM_PERCENT (unset = Slotstream default 70)   SLOTSTREAM_VISION (off)
 #   SLOTSTREAM_MEMORY_GB (unset = auto) explicit total-memory target; beats the RAM share
 #     and auto's model ceiling. Calibration writes it when a larger target measures better.
+#     When it does not fit what is reclaimable at start, run/start step it down for that
+#     start only (fit_memory_target); SLOTKEEPER_NO_FALLBACK=1 turns that off.
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
 #   SLOTSTREAM_PREFIX_CACHE_TOKENS (unset = Slotstream auto; a number or `full` retains whole
 #     conversations, needs the prefix-retention patch; read by the binary itself from the environment)
@@ -71,6 +73,7 @@ OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 LOG="$SLOTSTREAM_HOME/slotstream.log"
 PROFILE_FILE="$SLOTSTREAM_HOME/profile"
 PID_FILE="$SLOTSTREAM_HOME/slotstream.pid"
+NO_DEGRADE_FILE="$SLOTSTREAM_HOME/no-degrade"
 AGENT_LABEL="local.slotkeeper"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 BASE="http://127.0.0.1:$SLOTSTREAM_PORT"
@@ -160,6 +163,45 @@ serve_args() {
   SERVE_ARGS=("${args[@]}")
 }
 
+# A pinned target is a verdict calibration measured on one day with that day's apps open.
+# At a later start the machine may hold less, and the server refuses at startup for
+# reclaimable memory plus safety headroom (CONSTRAINTS.md, "A pinned target at startup").
+# Under launchd that refusal is a crash, so KeepAlive restarts it into the same refusal.
+# Degrade instead: `slotstream doctor` plans without loading the model (about a second), so
+# step the target down 0.5 GB until it fits, giving up expert cache but keeping the window
+# and retention, for this start only. ctl.env keeps the verdict. Below 6 GB, hand sizing
+# back to Slotstream's auto. Calibration must see the real refusal: SLOTKEEPER_NO_FALLBACK=1,
+# or the marker cmd_start leaves for a launchd start made on its behalf, turns this off.
+fit_memory_target() {
+  local context="$1" pinned="${SLOTSTREAM_MEMORY_GB:-}" try code
+  [[ -n "$pinned" ]] || return 0
+  [[ "${SLOTKEEPER_NO_FALLBACK:-0}" == 1 || -f "$NO_DEGRADE_FILE" ]] && return 0
+  local extra=()
+  (( context > 65536 )) && extra+=(--beyond-qualified-context)
+  # shellcheck disable=SC2206
+  [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && extra+=($SLOTSTREAM_EXTRA_ARGS)
+  try="$pinned"
+  # LC_ALL=C: this Mac's locale writes decimals with a comma ("12,2"), which the server rejects.
+  while LC_ALL=C awk -v t="$try" 'BEGIN { exit !(t >= 6) }'; do
+    code="$({ "$SLOTSTREAM_BIN" doctor --json --model "$SLOTSTREAM_MODEL" --max-context "$context" \
+      --vision "$SLOTSTREAM_VISION" --memory-gb "$try" ${extra[@]+"${extra[@]}"} 2>/dev/null || true; } \
+      | python3 -c 'import json, sys
+try: print((json.load(sys.stdin).get("error") or {}).get("code") or "fits")
+except Exception: print("unknown")')"
+    case "$code" in
+      fits)
+        [[ "$try" != "$pinned" ]] && log "warning: the pinned ${pinned} GB target does not fit what is reclaimable now; starting at ${try} GB (smaller expert cache, same window and retention). ctl.env still holds ${pinned} GB."
+        SLOTSTREAM_MEMORY_GB="$try"
+        return 0 ;;
+      insufficient_memory) try="$(LC_ALL=C awk -v t="$try" 'BEGIN { printf "%.1f", t - 0.5 }')" ;;
+      # doctor could not judge this configuration: start as asked and let the server say why
+      *) return 0 ;;
+    esac
+  done
+  log "warning: no target from ${pinned} GB down to 6 GB fits now; letting Slotstream size itself (auto) for this start"
+  unset SLOTSTREAM_MEMORY_GB
+}
+
 opencode_context() {
   # Best-effort read of the slotstream provider's declared context in the OpenCode config (JSONC, so no jq).
   [[ -f "$OPENCODE_CONFIG" ]] || return 0
@@ -211,6 +253,7 @@ cmd_run() {
   [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
   check_port; check_disk
   warn_profile_mismatch "$context"
+  fit_memory_target "$context"
   serve_args "$context"
   sync_opencode "$context"
   if [[ "$SLOTSTREAM_CAFFEINATE" == 1 ]]; then
@@ -243,6 +286,9 @@ start_fallback() {
 
 cmd_start() {
   local context; context="$(resolve_profile "${1:-}")"
+  # launchd does not inherit our environment, so tell cmd_run whether this start is a
+  # measurement that must not be degraded (see fit_memory_target).
+  if [[ "${SLOTKEEPER_NO_FALLBACK:-0}" == 1 ]]; then : > "$NO_DEGRADE_FILE"; else rm -f "$NO_DEGRADE_FILE"; fi
   if [[ -f "$AGENT_PLIST" ]]; then
     log "LaunchAgent is installed; starting through launchd"
     [[ -n "${1:-}" ]] && echo "$1" > "$PROFILE_FILE"
@@ -262,6 +308,7 @@ cmd_start() {
     [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
     check_port; check_disk; rotate_log
     warn_profile_mismatch "$context"
+    fit_memory_target "$context"
     serve_args "$context"
     sync_opencode "$context"
     log "starting: $SLOTSTREAM_BIN ${SERVE_ARGS[*]}"
