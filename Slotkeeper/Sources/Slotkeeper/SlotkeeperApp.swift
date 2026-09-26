@@ -13,6 +13,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppDelegate.shared = self
+        // SLOTKEEPER_RENDER=<dir>: write the menu panel and the Now tiles as PNGs with live
+        // data, then quit. How the panels are checked without clicking through the UI.
+        if let dir = ProcessInfo.processInfo.environment["SLOTKEEPER_RENDER"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { Self.render(to: dir) }
+            return
+        }
         // Started by launchd at login it stays in the menu bar; opened by hand, the
         // person wants to see something.
         if ProcessInfo.processInfo.environment["SLOTKEEPER_BACKGROUND"] == nil {
@@ -23,6 +29,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showDashboard()
         return true
+    }
+
+    static func render(to dir: String) {
+        let status = StatusModel.shared
+        let now = VStack(alignment: .leading, spacing: 14) {
+            ActivityTile(status: status, large: true)
+            HStack(alignment: .top, spacing: 14) { MemoryTile(status: status); SpeedTile(status: status) }
+            JobsTile(status: status)
+        }.padding(20).frame(width: 760)
+        for (name, view) in [("menu-panel", AnyView(MenuPanel(status: status))), ("now-screen", AnyView(now))] {
+            for (scheme, suffix) in [(ColorScheme.light, "light"), (.dark, "dark")] {
+                let renderer = ImageRenderer(content: view.environment(\.colorScheme, scheme)
+                    .background(Color(nsColor: scheme == .dark ? .black : .white)))
+                renderer.scale = 2
+                if let tiff = renderer.nsImage?.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name)-\(suffix).png"))
+                }
+            }
+        }
+        NSApplication.shared.terminate(nil)
     }
 
     func showDashboard() {
@@ -62,12 +89,11 @@ struct SlotkeeperApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            StatusMenu(status: .shared)
+            MenuPanel(status: .shared)
         } label: {
-            Label(StatusModel.shared.menuTitle, systemImage: StatusModel.shared.symbol)
-                .labelStyle(.titleAndIcon)
+            MenuBarLabel(status: .shared)
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
         .commands {
             CommandGroup(after: .windowList) {
                 Button("Slotkeeper Dashboard") { AppDelegate.shared?.showDashboard() }
@@ -77,68 +103,17 @@ struct SlotkeeperApp: App {
     }
 }
 
-struct StatusMenu: View {
+/// The item in the menu bar: an icon, and a word or two only when something is happening.
+struct MenuBarLabel: View {
     @ObservedObject var status: StatusModel
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text(status.headline).font(.headline)
-        ForEach(status.detailLines, id: \.self) { line in
-            Text(line)
-        }
-        Divider()
-        Button("Start (\(status.profileName))") { status.run("start") }.disabled(status.state != .stopped)
-        Button("Stop") { status.run("stop") }.disabled(status.state == .stopped)
-        Button("Restart") { status.run("restart") }.disabled(status.state == .stopped)
-        Menu("Profile") {
-            ForEach(["everyday", "conservative", "deep"], id: \.self) { name in
-                Button(name + (name == status.profileName ? "  ✓" : "")) { status.run("profile", name) }
-            }
-            Text("Applies on next start. Keep OpenCode's context declaration in sync.").font(.caption)
-        }
-        Divider()
-        if let req = status.activeRequest {
-            Text("Active: \(req.source)").font(.headline)
-            ForEach(req.lines, id: \.self) { Text($0) }
-            if let cpu = status.serverCPU { Text(String(format: "server cpu %.0f%%", cpu)).font(.caption) }
+        let title = status.compactTitle
+        if title.isEmpty {
+            Image(systemName: status.symbol)
         } else {
-            Text("No request in flight").font(.headline)
+            Label(title, systemImage: status.symbol).labelStyle(.titleAndIcon)
         }
-        Divider()
-        Text(status.jobsHeadline).font(.headline)
-        if status.jobs.queued > 0 || status.jobs.running != nil {
-            ForEach(status.jobs.lines, id: \.self) { Text($0).font(.caption) }
-        }
-        Button(status.jobs.pauseFlag == nil ? "Pause Job Runner" : "Resume Job Runner") { status.toggleJobsPause() }
-        if !status.jobs.daemonInstalled {
-            Button("Run Jobs Overnight…") { status.run("jobs", "daemon", "start") }
-        }
-        Divider()
-        Text(status.exerciserHeadline).font(.headline)
-        if status.exerciser.installed {
-            Text(status.exerciserSummary)
-            ForEach(status.exerciser.last, id: \.self) { Text($0).font(.caption) }
-            Button(status.exerciser.pauseFlag == nil ? "Pause Exerciser (save battery)" : "Resume Exerciser") { status.toggleExerciserPause() }
-            Button("Stop Exerciser") { status.run("exerciser", "stop") }
-        } else {
-            Button("Start Exerciser") { status.run("exerciser", "start") }
-        }
-        Divider()
-        Button("Open Dashboard…") { AppDelegate.shared?.showDashboard() }
-            .keyboardShortcut("d", modifiers: [.command, .shift])
-        Button("Copy Endpoint") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(status.endpoint, forType: .string)
-        }
-        Button("Open Server Log") { NSWorkspace.shared.open(status.logURL) }
-        Button("Open Metrics Folder") { NSWorkspace.shared.open(status.metricsURL) }
-        Button("Support Bundle") { status.run("bundle") }
-        if let last = status.lastActionOutput, !last.isEmpty {
-            Divider()
-            Text(last).font(.caption).lineLimit(4)
-        }
-        Divider()
-        Button("Quit Slotkeeper") { NSApplication.shared.terminate(nil) }
     }
 }
 
@@ -159,6 +134,7 @@ final class StatusModel: ObservableObject {
     @Published var profileName = "everyday"
     @Published var serverMemoryGB: Double?
     @Published var lastRequest: LastRequest?
+    @Published var activity: Activity = .idle
 
     let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream")
     /// Settings shared with the scripts: ~/.slotstream/ctl.env (KEY=value), overridable by environment.
@@ -212,19 +188,6 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    var menuTitle: String {
-        switch state {
-        case .ready:
-            // What you glance at: how much the server holds, and how fast it last generated.
-            var parts: [String] = []
-            if let gb = serverMemoryGB { parts.append(String(format: "%.1fG", gb)) }
-            if let tps = lastRequest?.decodeTokS { parts.append(String(format: "%.1ft/s", tps)) }
-            return parts.isEmpty ? (plan.expertsPerLayer.map { "\($0)/L" } ?? "ready") : parts.joined(separator: " ")
-        case .loading: return "loading"
-        case .unhealthy: return "!"
-        case .stopped: return "off"
-        }
-    }
 
     var headline: String {
         switch state {
@@ -507,9 +470,11 @@ final class StatusModel: ObservableObject {
             let cpu = await serverCPUPercent()
             let memory = await serverPID().flatMap { pid_t($0) }.flatMap { physicalFootprintGB(pid: $0) }
             let last = LastRequest.fromLog(logURL)
+            let activity = Activity.fromLog(logURL)
             await MainActor.run {
                 self.serverMemoryGB = memory
                 self.lastRequest = last
+                self.activity = activity
                 self.exerciser = ex
                 self.jobs = jobsState
                 self.activeRequest = active
@@ -637,7 +602,11 @@ struct LastRequest {
         try? handle.seek(toOffset: size > 65_536 ? size - 65_536 : 0)
         guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8),
               let line = text.split(separator: "\n").last(where: { $0.contains("] request: ") }) else { return nil }
-        let s = String(line)
+        return parse(String(line))
+    }
+
+    static func parse(_ s: String) -> LastRequest? {
+        guard s.contains("] request: ") else { return nil }
         func match(_ pattern: String) -> String? {
             guard let r = s.range(of: pattern, options: .regularExpression) else { return nil }
             return String(s[r])

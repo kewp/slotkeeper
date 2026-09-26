@@ -36,35 +36,50 @@ struct DashboardView: View {
     @State private var budget: BudgetTables?
     @State private var attempts: [CalibrationAttempt] = []
     @State private var hours = 24.0
+    @State private var advancedSection = "Verdict"
+
+    static let advancedSections = ["Verdict", "Capacity", "Measurements", "System", "Server", "Health"]
+
+    @ViewBuilder private var advanced: some View {
+        switch advancedSection {
+        case "Capacity": capacityTab
+        case "Measurements": attemptsTab
+        case "System": systemTab
+        case "Server": serverTab
+        case "Health": healthTab
+        default: VerdictPanel(verdict: verdict, loading: verdictLoading); overview
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Slotkeeper").font(.title2).bold()
                 Spacer()
-                Picker("Window", selection: $hours) {
+                Picker("History covers", selection: $hours) {
                     Text("6h").tag(6.0); Text("24h").tag(24.0); Text("3d").tag(72.0); Text("7d").tag(168.0)
                 }.pickerStyle(.segmented).frame(width: 220)
                 Button("Reload") { load() }
             }
             .padding(.horizontal, 20).padding(.top, 16)
+            // Now is the highlights; the measurement and server detail sits under Advanced
+            // so the first thing you see is what is happening, not eight tabs of tables.
             TabView {
-                ScrollView { VStack(alignment: .leading, spacing: 18) { VerdictPanel(verdict: verdict, loading: verdictLoading); live; overview }.padding(20) }
-                    .tabItem { Text("Overview") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { capacityTab }.padding(20) }
-                    .tabItem { Text("Capacity") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { attemptsTab }.padding(20) }
-                    .tabItem { Text("Measurements") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
-                    .tabItem { Text("Your work") }
+                NowScreen(status: status)
+                    .tabItem { Text("Now") }
                 ScrollView { VStack(alignment: .leading, spacing: 18) { jobsTab }.padding(20) }
                     .tabItem { Text("Jobs") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { systemTab }.padding(20) }
-                    .tabItem { Text("System") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { serverTab }.padding(20) }
-                    .tabItem { Text("Server") }
-                ScrollView { VStack(alignment: .leading, spacing: 18) { healthTab }.padding(20) }
-                    .tabItem { Text("Health") }
+                ScrollView { VStack(alignment: .leading, spacing: 18) { live; yourRequests }.padding(20) }
+                    .tabItem { Text("History") }
+                VStack(alignment: .leading, spacing: 0) {
+                    Picker("Section", selection: $advancedSection) {
+                        ForEach(Self.advancedSections, id: \.self) { Text($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                    .padding(.horizontal, 20).padding(.top, 12)
+                    ScrollView { VStack(alignment: .leading, spacing: 18) { advanced }.padding(20) }
+                }
+                .tabItem { Text("Advanced") }
             }
         }
         .frame(minWidth: 860, minHeight: 720)
