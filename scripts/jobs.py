@@ -199,8 +199,11 @@ def run_job(job, respect_window=True):
         log.write(f"\n=== {now()} attempt {job['attempts']}: {' '.join(cmd[:8])} ...\n")
         log.flush()
         try:
-            proc = subprocess.Popen(cmd, cwd=job["repo"], stdout=log, stderr=subprocess.STDOUT,
-                                    stdin=subprocess.DEVNULL)
+            # PWD too: OpenCode's server takes its project directory from $PWD, not the real
+            # working directory, so an inherited PWD sent a job into whatever repository the
+            # runner was started from (measured 2026-09-26: clone asked, ~/slotkeeper used).
+            proc = subprocess.Popen(cmd, cwd=job["repo"], env=dict(os.environ, PWD=job["repo"]),
+                                    stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
             deadline = time.monotonic() + TIMEOUT_H * 3600
             while proc.poll() is None:
                 if stop:
