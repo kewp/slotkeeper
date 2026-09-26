@@ -31,7 +31,7 @@ Settings (env or ~/.slotstream/ctl.env):
   JOBS_TIMEOUT_H (6)                      give up on one job after this many hours
   JOBS_RETRIES (2)                        retries after a memory failure
 """
-import argparse, json, os, re, signal, subprocess, sys, time
+import argparse, fcntl, json, os, re, signal, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 HOME = os.environ.get("SLOTSTREAM_HOME", os.path.expanduser("~/.slotstream"))
@@ -52,6 +52,7 @@ RETRIES = int(os.environ.get("JOBS_RETRIES", "2"))
 ROOT = os.path.join(HOME, "jobs")
 QUEUED, RUNNING, DONE, LOGS = (os.path.join(ROOT, d) for d in ("queued", "running", "done", "logs"))
 PAUSE = os.path.join(ROOT, "jobs.pause")
+RUNNER_LOCK = os.path.join(ROOT, "runner.lock")
 ACTIVE = os.path.join(HOME, "opencode-active")
 OPENCODE_DB = os.environ.get("OPENCODE_DB", os.path.expanduser("~/.local/share/opencode/opencode.db"))
 
@@ -244,6 +245,18 @@ def run_job(job, respect_window=True):
     return job
 
 
+def take_runner_lock():
+    """The open lock file, or None when another runner holds it. The daemon and a manual
+    `run` would otherwise both take the head of the queue; the lock dies with its holder."""
+    f = open(RUNNER_LOCK, "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except BlockingIOError:
+        f.close()
+        return None
+
+
 def run_loop(once=False, respect_window=True, daemon=False):
     while not stop:
         queued = jobs_in(QUEUED)
@@ -254,17 +267,26 @@ def run_loop(once=False, respect_window=True, daemon=False):
             time.sleep(60)
             continue
         why = blocked(respect_window)
+        lock = None if why else take_runner_lock()
+        if not why and lock is None:
+            why = "another runner is running a job"
         if why:
             print(f"waiting: {why}", flush=True)
             if once and not daemon:
                 return
             time.sleep(60)
             continue
-        job = queued[0]
-        print(f"running {job['id']}: {job['task'][:70]}", flush=True)
-        job = run_job(job, respect_window)
-        print(f"  {job['result']} in {job.get('elapsed_s', 0) / 60:.1f} min, "
-              f"{job.get('changed_files', 0)} files changed, log {os.path.join(LOGS, job['id'] + '.log')}", flush=True)
+        try:
+            queued = jobs_in(QUEUED)  # re-read under the lock: the other runner may have taken it
+            if not queued:
+                continue
+            job = queued[0]
+            print(f"running {job['id']}: {job['task'][:70]}", flush=True)
+            job = run_job(job, respect_window)
+            print(f"  {job['result']} in {job.get('elapsed_s', 0) / 60:.1f} min, "
+                  f"{job.get('changed_files', 0)} files changed, log {os.path.join(LOGS, job['id'] + '.log')}", flush=True)
+        finally:
+            lock.close()
         if once:
             return
 
