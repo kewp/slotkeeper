@@ -1,0 +1,5 @@
+# Order in which scripts/build-slotstream.sh applies the patches to stock 0.2.25.
+# 0.2.17+ takes any window up to the model limit and 0.2.22+ accepts store:false, so
+# window-beyond-qualified and store-false are gone; the rest are ported as measurement
+# shows 0.2.25 still needs them.
+slotstream-0.2.25-request-summary.patch

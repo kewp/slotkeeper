@@ -53,6 +53,11 @@
 #   SLOTSTREAM_EXTRA_ARGS (appended verbatim)   OPENCODE_CONFIG (~/.config/opencode/opencode.json)
 #   SLOTSTREAM_PREFIX_CACHE_TOKENS (unset = Slotstream auto; a number or `full` retains whole
 #     conversations, needs the prefix-retention patch; read by the binary itself from the environment)
+#   SLOTSTREAM_MEMORY_LIMIT_GB (0.2.23+) adaptive ceiling instead of a pinned target: sized to
+#     what is free at startup, shrinks and regrows with other apps. Beats SLOTSTREAM_MEMORY_GB.
+#   SLOTSTREAM_PREFIX_CACHE_DIR (0.2.15+) keep conversation states on disk there.
+#   Flags a binary does not know are left out (see supports), so these are safe to set
+#   before an upgrade and harmless after a rollback.
 #   Persist any of these in ~/.slotstream/ctl.env (KEY=value lines); it is read by this script,
 #   monitor.sh, bench.py and Slotkeeper, so one file defines the port everywhere.
 set -euo pipefail
@@ -146,6 +151,14 @@ prefill_wait_for() {
   else echo "$SLOTSTREAM_MAX_PREFILL_WAIT_DEFAULT"; fi
 }
 
+# Whether this binary's subcommand accepts a flag. Flags come and go between releases:
+# 0.2.14's patched --beyond-qualified-context is unknown to 0.2.25, which refuses unknown
+# options, and 0.2.25's --memory-limit-gb and --prefix-cache-dir are unknown to 0.2.14.
+# Asking the binary keeps one script working across an upgrade and a rollback.
+supports() { # supports <subcommand> <flag>
+  "$SLOTSTREAM_BIN" "$1" --help 2>&1 | grep -q -- "$2"
+}
+
 SERVE_ARGS=()
 serve_args() {
   # Fills SERVE_ARGS (bash 3.2 on macOS has no mapfile).
@@ -155,9 +168,18 @@ serve_args() {
   # auto's model ceiling when a machine has the memory to spare.
   # Above the qualified envelope the server needs to be told we mean it; the planner
   # still refuses a window that does not fit, which is the check that matters.
-  (( context > 65536 )) && args+=(--beyond-qualified-context)
-  if [[ -n "${SLOTSTREAM_MEMORY_GB:-}" ]]; then args+=(--memory-gb "$SLOTSTREAM_MEMORY_GB")
+  # (0.2.17 and later take any window up to the model limit without it.)
+  (( context > 65536 )) && supports serve --beyond-qualified-context && args+=(--beyond-qualified-context)
+  # An adaptive ceiling (0.2.23+) sizes to what is free at startup and shrinks and regrows
+  # with other apps: the server's own degrade-instead-of-refuse. It excludes --memory-gb.
+  if [[ -n "${SLOTSTREAM_MEMORY_LIMIT_GB:-}" ]] && supports serve --memory-limit-gb; then
+    args+=(--memory-limit-gb "$SLOTSTREAM_MEMORY_LIMIT_GB")
+  elif [[ -n "${SLOTSTREAM_MEMORY_GB:-}" ]]; then args+=(--memory-gb "$SLOTSTREAM_MEMORY_GB")
   elif [[ -n "${SLOTSTREAM_MAX_RAM_PERCENT:-}" ]]; then args+=(--max-ram-percent "$SLOTSTREAM_MAX_RAM_PERCENT"); fi
+  # Conversation states on disk (0.2.14+ patched builds lack it): a follow-up turn of a
+  # conversation longer than the in-memory cache holds resumes instead of re-reading.
+  [[ -n "${SLOTSTREAM_PREFIX_CACHE_DIR:-}" ]] && supports serve --prefix-cache-dir \
+    && args+=(--prefix-cache-dir "$SLOTSTREAM_PREFIX_CACHE_DIR")
   # shellcheck disable=SC2206
   [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && args+=($SLOTSTREAM_EXTRA_ARGS)
   SERVE_ARGS=("${args[@]}")
@@ -176,8 +198,11 @@ fit_memory_target() {
   local context="$1" pinned="${SLOTSTREAM_MEMORY_GB:-}" try code
   [[ -n "$pinned" ]] || return 0
   [[ "${SLOTKEEPER_NO_FALLBACK:-0}" == 1 || -f "$NO_DEGRADE_FILE" ]] && return 0
+  # An adaptive ceiling replaces the pinned target, and the server sizes it itself.
+  [[ -n "${SLOTSTREAM_MEMORY_LIMIT_GB:-}" ]] && supports serve --memory-limit-gb && return 0
   local extra=()
-  (( context > 65536 )) && extra+=(--beyond-qualified-context)
+  # 0.2.14's doctor could not plan above 65,536 at all, so there this check is blind.
+  (( context > 65536 )) && supports doctor --beyond-qualified-context && extra+=(--beyond-qualified-context)
   # shellcheck disable=SC2206
   [[ -n "${SLOTSTREAM_EXTRA_ARGS:-}" ]] && extra+=($SLOTSTREAM_EXTRA_ARGS)
   try="$pinned"

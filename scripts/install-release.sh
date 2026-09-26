@@ -27,8 +27,10 @@ case "${1:-}" in
 esac
 
 src="${1:?source tree}"
-name="${2:-slotstream-0.2.14-local-$(date +%Y%m%d%H%M%S)}"
 out="$src/.build/release"
+# Name the release by the version the binary reports, not the one this script was written for.
+version="$("$out/slotstream" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+name="${2:-slotstream-${version:-unknown}-local-$(date +%Y%m%d%H%M%S)}"
 for f in slotstream mlx.metallib build-identity.json; do [[ -f "$out/$f" ]] || { echo "missing $out/$f" >&2; exit 1; }; done
 if pgrep -f "slotstream serve" >/dev/null; then echo "server is running; stop it first (scripts/slotkeeper stop)" >&2; exit 1; fi
 
