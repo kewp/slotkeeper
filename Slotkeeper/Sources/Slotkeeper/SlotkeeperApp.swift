@@ -157,6 +157,8 @@ final class StatusModel: ObservableObject {
     @Published var freePercent: Int?
     @Published var lastActionOutput: String?
     @Published var profileName = "everyday"
+    @Published var serverMemoryGB: Double?
+    @Published var lastRequest: LastRequest?
 
     let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".slotstream")
     /// Settings shared with the scripts: ~/.slotstream/ctl.env (KEY=value), overridable by environment.
@@ -201,7 +203,9 @@ final class StatusModel: ObservableObject {
 
     var symbol: String {
         switch state {
-        case .ready: return pressure == "critical" ? "exclamationmark.triangle.fill" : "brain.head.profile"
+        case .ready:
+            if pressure == "critical" { return "exclamationmark.triangle.fill" }
+            return jobs.running != nil ? "hammer.fill" : "brain.head.profile"
         case .loading: return "hourglass"
         case .unhealthy: return "exclamationmark.triangle"
         case .stopped: return "brain.head.profile"
@@ -210,7 +214,12 @@ final class StatusModel: ObservableObject {
 
     var menuTitle: String {
         switch state {
-        case .ready: return plan.expertsPerLayer.map { "\($0)/L" } ?? "ready"
+        case .ready:
+            // What you glance at: how much the server holds, and how fast it last generated.
+            var parts: [String] = []
+            if let gb = serverMemoryGB { parts.append(String(format: "%.1fG", gb)) }
+            if let tps = lastRequest?.decodeTokS { parts.append(String(format: "%.1ft/s", tps)) }
+            return parts.isEmpty ? (plan.expertsPerLayer.map { "\($0)/L" } ?? "ready") : parts.joined(separator: " ")
         case .loading: return "loading"
         case .unhealthy: return "!"
         case .stopped: return "off"
@@ -229,6 +238,11 @@ final class StatusModel: ObservableObject {
     var detailLines: [String] {
         var lines = ["memory pressure \(pressure)" + (freePercent.map { ", \($0)% free" } ?? "")]
         guard state == .ready else { return lines }
+        if let gb = serverMemoryGB {
+            lines.append(String(format: "server using %.1f GB", gb)
+                + (plan.peakGB.map { String(format: " (planned peak %.1f GB)", $0) } ?? ""))
+        }
+        if let last = lastRequest { lines.append(last.summary) }
         if let ctx = plan.maxContext { lines.append("context window \(ctx.formatted()) tokens") }
         if let e = plan.expertsPerLayer, let pool = plan.poolGB {
             lines.append("expert cache \(e)/layer (\(pool.formatted(.number.precision(.fractionLength(1)))) GB)")
@@ -350,10 +364,14 @@ final class StatusModel: ObservableObject {
         var pauseFlag: String?
         var queued = 0
         var running: String?
+        var runningStarted: Date?
         var lastResults: [String] = []
         var lines: [String] {
             var out: [String] = []
-            if let r = running { out.append("running: " + r) }
+            if let r = running {
+                let mins = runningStarted.map { Int(-$0.timeIntervalSinceNow / 60) }
+                out.append("running" + (mins.map { " \($0) min" } ?? "") + ": " + r)
+            }
             if queued > 0 { out.append("\(queued) queued") }
             return out + lastResults.prefix(2)
         }
@@ -387,7 +405,8 @@ final class StatusModel: ObservableObject {
             return try? JSONSerialization.jsonObject(with: d) as? [String: Any]
         }
         if let first = files("running").first, let o = job(first) {
-            st.running = (o["task"] as? String)?.prefix(50).description
+            st.running = (o["label"] as? String ?? o["task"] as? String)?.prefix(50).description
+            st.runningStarted = (o["started"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
         }
         st.lastResults = files("done").prefix(2).compactMap { url in
             guard let o = job(url) else { return nil }
@@ -486,7 +505,11 @@ final class StatusModel: ObservableObject {
             let jobsState = readJobs()
             let active = readActiveRequest(exerciser: ex, exerciserProgress: ex.progress)
             let cpu = await serverCPUPercent()
+            let memory = await serverPID().flatMap { pid_t($0) }.flatMap { physicalFootprintGB(pid: $0) }
+            let last = LastRequest.fromLog(logURL)
             await MainActor.run {
+                self.serverMemoryGB = memory
+                self.lastRequest = last
                 self.exerciser = ex
                 self.jobs = jobsState
                 self.activeRequest = active
@@ -518,10 +541,16 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    private func serverCPUPercent() async -> Double? {
-        let pid = await Shell.run("/usr/bin/pgrep", ["-f", "slotstream serve"]).stdout
+    /// The server itself. `pgrep -f "slotstream serve"` also matches the caffeinate
+    /// wrapper launchd starts it under, and it could come first.
+    private func serverPID() async -> String? {
+        let pid = await Shell.run("/usr/bin/pgrep", ["-x", "slotstream"]).stdout
             .split(separator: "\n").first.map(String.init) ?? ""
-        guard !pid.isEmpty else { return nil }
+        return pid.isEmpty ? nil : pid
+    }
+
+    private func serverCPUPercent() async -> Double? {
+        guard let pid = await serverPID() else { return nil }
         let out = await Shell.run("/bin/ps", ["-o", "%cpu=", "-p", pid]).stdout
         return Double(out.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "."))
     }
@@ -544,6 +573,7 @@ final class StatusModel: ObservableObject {
             summary.maxContext = plan["max_context_tokens"] as? Int
             summary.prefillTokS = plan["est_prefill_tok_s"] as? Double
             summary.warmTokS = plan["est_warm_tok_s"] as? Double
+            summary.peakGB = plan["expected_peak_gb"] as? Double
             summary.notes = plan["notes"] as? [String] ?? []
         }
         if let cache = details["prefix_cache"] as? [String: Any] {
@@ -574,7 +604,73 @@ struct PlanSummary {
     var warmTokS: Double?
     var prefixHeld: Int?
     var prefixMax: Int?
+    var peakGB: Double?
     var notes: [String] = []
+}
+
+/// The server's own record of its last finished request (the request-summary patch),
+/// e.g. "[18:52:10] request: done, 3071 prompt tokens (3071 read at 93 tok/s, 0 reused),
+/// 480 generated at 11.65 tok/s, first token after 33.6 s, finish stop".
+struct LastRequest {
+    var time = ""
+    var failed: String?
+    var promptTokens: Int?
+    var prefillTokS: Double?
+    var generated: Int?
+    var decodeTokS: Double?
+    var firstTokenS: Double?
+
+    var summary: String {
+        if let failed { return "last request \(time) failed: \(failed)" }
+        var parts: [String] = []
+        if let g = generated, let d = decodeTokS { parts.append(String(format: "%d tokens at %.2f tok/s", g, d)) }
+        if let f = firstTokenS { parts.append(String(format: "first token %.0f s", f)) }
+        if let p = prefillTokS, let n = promptTokens { parts.append(String(format: "read %d at %.0f tok/s", n, p)) }
+        return "last request \(time): " + parts.joined(separator: ", ")
+    }
+
+    /// The last "request:" line in the tail of the server log, or nil.
+    static func fromLog(_ url: URL) -> LastRequest? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > 65_536 ? size - 65_536 : 0)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8),
+              let line = text.split(separator: "\n").last(where: { $0.contains("] request: ") }) else { return nil }
+        let s = String(line)
+        func match(_ pattern: String) -> String? {
+            guard let r = s.range(of: pattern, options: .regularExpression) else { return nil }
+            return String(s[r])
+        }
+        func number(_ pattern: String) -> Double? {
+            guard let m = match(pattern) else { return nil }
+            let digits = m.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
+                .first(where: { !$0.isEmpty && $0 != "." })
+            return digits.flatMap(Double.init)
+        }
+        var last = LastRequest()
+        last.time = match(#"^\[[^\]]+\]"#).map { String($0.dropFirst().dropLast()) } ?? ""
+        if let r = s.range(of: "request: failed ") {
+            last.failed = String(s[r.upperBound...]).prefix(80).description
+            return last
+        }
+        last.promptTokens = number(#"done, \d+ prompt"#).map(Int.init)
+        last.prefillTokS = number(#"read at [\d.]+ tok/s"#)
+        last.generated = number(#"\d+ generated"#).map(Int.init)
+        last.decodeTokS = number(#"generated at [\d.]+ tok/s"#)
+        last.firstTokenS = number(#"first token after [\d.]+ s"#)
+        return last
+    }
+}
+
+/// The server's physical footprint: what Activity Monitor calls Memory. RSS is
+/// meaningless here because the experts are memory-mapped from disk.
+func physicalFootprintGB(pid: pid_t) -> Double? {
+    var info = rusage_info_v4()
+    let ok = withUnsafeMutablePointer(to: &info) { ptr in
+        ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+    }
+    return ok == 0 ? Double(info.ri_phys_footprint) / 1e9 : nil
 }
 
 enum Http {
