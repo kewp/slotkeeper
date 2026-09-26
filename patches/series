@@ -1,0 +1,15 @@
+# Order in which scripts/build-slotstream.sh applies the patches to stock 0.2.14.
+# Each patch is written on top of the ones above it. Verified 2026-09-26: this order
+# applied to build-source.tar.gz.0.2.14.original reproduces the installed release's
+# source exactly (plus store-false).
+slotstream-0.2.14-opencode-retry.patch
+slotstream-0.2.14-prefix-retention.patch
+slotstream-0.2.14-pressure-ceiling.patch
+slotstream-0.2.14-resume-after-refusal.patch
+slotstream-0.2.14-stale-pressure.patch
+slotstream-0.2.14-window-beyond-qualified.patch
+slotstream-0.2.14-settable-headroom.patch
+slotstream-0.2.14-working-set.patch
+slotstream-0.2.14-store-false.patch
+slotstream-0.2.14-request-summary.patch
+slotstream-0.2.14-working-set-check.patch

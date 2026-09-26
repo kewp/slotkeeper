@@ -43,6 +43,7 @@ patch_status() {
   if grep -q "beyond-qualified-context" <<<"$dump"; then echo "  window-beyond-qualified patch: present"; else echo "  window-beyond-qualified patch: absent"; fi
   if grep -q "SLOTSTREAM_AVAILABILITY_SLACK_GB" <<<"$dump"; then echo "  settable-headroom patch: present"; else echo "  settable-headroom patch: absent"; fi
   if grep -q "SLOTSTREAM_WORKING_SET_GB" <<<"$dump"; then echo "  working-set patch: present"; else echo "  working-set patch: absent"; fi
+  if grep -q "this server keeps no completions" <<<"$dump"; then echo "  store-false patch: present"; else echo "  store-false patch: absent"; fi
 }
 if (( STATUS )); then patch_status; exit 0; fi
 
@@ -60,7 +61,10 @@ if [[ -n "$SOURCE" ]]; then
   cp -R "$SOURCE"/. "$work"/
 else
   archive=""
-  for candidate in "$BIN/build-source.tar.gz.$PATCH_VERSION.original" "$BIN/build-source.tar.gz"; do
+  # The stock archive stays with the release it came from, not with whichever release
+  # $BIN points at now; the installed build-source.tar.gz is already patched.
+  for candidate in "$BIN/build-source.tar.gz.$PATCH_VERSION.original" \
+      "$SLOTSTREAM_HOME"/releases/*/build-source.tar.gz."$PATCH_VERSION".original "$BIN/build-source.tar.gz"; do
     [[ -f "$candidate" ]] && { archive="$candidate"; break; }
   done
   [[ -n "$archive" ]] || die "no build-source.tar.gz beside the installed binary; pass --source <dir>"
@@ -71,8 +75,23 @@ fi
 rm -rf "$work/.build"
 
 log "applying patches"
+# patches/series gives the order: later patches are written on top of earlier ones, and
+# alphabetical order put settable-headroom and working-set before window-beyond-qualified.
+series=()
+if [[ -f "$REPO/patches/series" ]]; then
+  while read -r n; do
+    [[ -z "$n" || "$n" == \#* ]] && continue
+    [[ -f "$REPO/patches/$n" ]] || die "patches/series names $n, which does not exist"
+    series+=("$REPO/patches/$n")
+  done < "$REPO/patches/series"
+  for p in "$REPO"/patches/*.patch; do
+    grep -qxF "$(basename "$p")" "$REPO/patches/series" || die "$(basename "$p") is not in patches/series"
+  done
+else
+  series=("$REPO"/patches/*.patch)
+fi
 applied=0
-for p in "$REPO"/patches/*.patch; do
+for p in "${series[@]}"; do
   name="$(basename "$p")"
   if (cd "$work" && patch --dry-run --forward --batch -p1 < "$p" >/dev/null 2>&1); then
     (cd "$work" && patch --forward --batch -p1 < "$p" >/dev/null)

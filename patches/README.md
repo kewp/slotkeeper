@@ -1,11 +1,15 @@
 # Slotstream patches
 
-Five patches against [Slotstream](https://github.com/carloslfu/slotstream)
-0.2.14 source. Apply in this order (alphabetical, which is what
-`scripts/slotkeeper patch` does); each is independent of Slotkeeper and is a
-candidate for an upstream pull request. All four apply cleanly to a stock
-0.2.14 tree in that order (verified 2026-09-12) and pass Slotstream's T0
-check suite (`make checks`, 34 checks, 25,450 assertions) with the new
+Patches against [Slotstream](https://github.com/carloslfu/slotstream)
+0.2.14 source. Apply them in the order listed in `series`, which is what
+`scripts/slotkeeper patch` does: later patches are written on top of earlier
+ones, and alphabetical order (the old rule) puts settable-headroom and
+working-set before window-beyond-qualified, where they do not apply. Each is
+independent of Slotkeeper and is a candidate for an upstream pull request. In
+`series` order all of them apply cleanly to the stock archive
+(`build-source.tar.gz.0.2.14.original`, kept in the `2fd5bfab…-macos26`
+release), reproducing the installed release's source exactly (verified
+2026-09-26), and pass Slotstream's T0 check suite (`make checks`) with the new
 checks included.
 
 | Patch | What it changes | New check |
@@ -15,6 +19,7 @@ checks included.
 | `slotstream-0.2.14-pressure-ceiling.patch` | After an OS pressure event the elastic governor remembers the pool that met it, and for 20 minutes will not regrow past 1 GB below it. Repeated events ratchet the ceiling down; an availability shrink is never blocked; the ceiling is forgotten after the window. | assertions added to `governor-check` (regrowth capped, reason string, cooldown still applies, forgotten after the window, no effect when above the replan, dead-band respected, shrink unaffected, ratchet) |
 | `slotstream-0.2.14-resume-after-refusal.patch` | A request refused between prefill passes keeps the prefix it had already committed, so the client's retry resumes instead of re-reading the whole prompt, and the server logs how many tokens it kept. The engine's memory-failure teardown then frees the other conversations but keeps that one (`dropAllButLatest`), instead of dropping everything. Execution errors still keep nothing. A governor shrink keeps a large retained prefix: reaching the pool floor is no longer a reason to drop it, and only a critical pressure event is. When the window plus a full held conversation no longer fits what other apps left, the governor sheds the conversation and keeps serving instead of refusing every request. | assertions added to `prefix-client-capacity` (which failure codes keep a boundary, controller state, what survives a memory failure) and `governor-check` (kept above the protected size, kept at the floor, kept under a warning, dropped on critical) |
 | `slotstream-0.2.14-stale-pressure.patch` | The request path no longer refuses on the OS pressure latch alone. `RequestPressurePolicy` admits a request when reclaimable memory is at least a quarter of RAM (never below 6 GB), fails closed when availability cannot be read, and logs the decision once a minute. | `request-pressure-policy` (8 assertions) |
+| `slotstream-0.2.14-store-false.patch` | `/v1/chat/completions` accepts `store: false`, which OpenCode 2 sends on every call and which the server rejected as an unsupported field (every OpenCode request failed). Like `logprobs`, it is accepted only at the value this server implements: nothing is ever stored, so `store: true` fails with an explicit message. | assertions added to `openai-conversation` (`store: false` among the accepted SDK defaults; `store: true` and a non-boolean fail explicitly) |
 
 ## Apply and build
 

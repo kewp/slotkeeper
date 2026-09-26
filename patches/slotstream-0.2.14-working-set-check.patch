@@ -1,0 +1,29 @@
+diff -ruN -x .build -x lib -x *.orig after2/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift after3/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift
+--- a/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-26 18:44:34
++++ b/Sources/SlotstreamDiagnostics/Diagnostics+Context.swift	2026-09-26 18:47:33
+@@ -18,13 +18,20 @@
+         Planner.workingSetOverrideGB = nil
+         // A plan the working set refuses must become possible when the bound is raised,
+         // because that bound is the only thing standing between it and the memory.
+-        func fits(_ workingSet: Double) -> Bool {
+-            (try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 20,
++        func plan(_ workingSet: Double) -> MemoryPlan? {
++            try? Planner.plan(expertsPerLayer: nil, poolGB: nil, memoryGB: 20,
+                 ramGB: 26, workingSetGB: workingSet, availableGB: 24, vision: .off,
+-                maxContextTokens: 65_536, simulated: true, qualification: true)) != nil
++                maxContextTokens: 65_536, simulated: true, qualification: true)
+         }
+-        c.expect("the recommendation refuses a plan that a larger bound admits",
+-                 !fits(19.0) && fits(24.0))
++        // The bound refuses a plan only when its peak exceeds it, and a 20 GB target
++        // keeps a planning margin, so its peak sits under 20. A fixed 19 GB bound stopped
++        // refusing once the peak fell below it (2026-09-26); measure the peak instead.
++        let admitted = plan(24.0)
++        c.expect("a generous bound admits the plan", admitted != nil)
++        if let peak = admitted?.expectedPeakGB {
++            c.expect("the recommendation refuses a plan that a larger bound admits",
++                     plan(peak - 0.5) == nil)
++        }
+         return c.report()
+     }
+ 
