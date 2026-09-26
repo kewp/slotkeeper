@@ -170,6 +170,8 @@ def git(repo, *args):
 def run_job(job, respect_window=True):
     job["started"] = now()
     job["attempts"] = job.get("attempts", 0) + 1
+    # `add` writes "queued" and a retry writes "retrying"; each attempt earns its own result.
+    job.pop("result", None)
     path = os.path.join(RUNNING, os.path.basename(job["_path"]))
     os.makedirs(RUNNING, exist_ok=True)
     os.replace(job["_path"], path)
@@ -178,8 +180,10 @@ def run_job(job, respect_window=True):
 
     log_path = os.path.join(LOGS, job["id"] + ".log")
     os.makedirs(LOGS, exist_ok=True)
-    cmd = ["opencode", "run", "--dir", job["repo"], "--model", f"{PROVIDER}/{MODEL}",
-           "--agent", job.get("agent", "build"), "--print-logs", "--log-level", "INFO"]
+    # OpenCode 2 dropped `run --dir`: the job runs in the repository instead, on a private
+    # server (--standalone) so it neither needs nor disturbs your background OpenCode service.
+    cmd = ["opencode", "run", "--standalone", "--model", f"{PROVIDER}/{MODEL}",
+           "--agent", job.get("agent", "build"), "--print-logs", "--log-level", "info"]
     if job.get("auto"):
         cmd.append("--auto")
     if job.get("session"):
@@ -195,7 +199,8 @@ def run_job(job, respect_window=True):
         log.write(f"\n=== {now()} attempt {job['attempts']}: {' '.join(cmd[:8])} ...\n")
         log.flush()
         try:
-            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(cmd, cwd=job["repo"], stdout=log, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL)
             deadline = time.monotonic() + TIMEOUT_H * 3600
             while proc.poll() is None:
                 if stop:
