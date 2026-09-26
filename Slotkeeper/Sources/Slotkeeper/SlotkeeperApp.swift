@@ -19,6 +19,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { Self.render(to: dir) }
             return
         }
+        // Opened as a login item it stays in the menu bar, like the old launchd start.
+        let launch = NSAppleEventManager.shared().currentAppleEvent
+        if launch?.eventID == AEEventID(kAEOpenApplication),
+           launch?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem) {
+            return
+        }
         // Started by launchd at login it stays in the menu bar; opened by hand, the
         // person wants to see something.
         if ProcessInfo.processInfo.environment["SLOTKEEPER_BACKGROUND"] == nil {

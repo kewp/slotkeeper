@@ -1,6 +1,33 @@
 import AppKit
 import Charts
+import ServiceManagement
 import SwiftUI
+
+/// Open at Login, as a system login item (System Settings › General › Login Items).
+/// Off unless turned on here; the model itself never loads at login.
+enum LoginItem {
+    static var isOn: Bool { SMAppService.mainApp.status == .enabled }
+    static var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
+
+    /// nil on success, otherwise what went wrong, in words.
+    @discardableResult
+    static func set(_ on: Bool) -> String? {
+        guard on != isOn else { return nil }
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            return error.localizedDescription
+        }
+        return needsApproval ? "Allow Slotkeeper in System Settings › General › Login Items" : nil
+    }
+}
+
+/// The idle stop is a small LaunchAgent (`slotkeeper idle`); its plist is the switch.
+enum IdleStop {
+    static var isOn: Bool {
+        FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.slotkeeper-idle.plist")
+    }
+}
 
 // The highlights: what the model is doing, the memory it takes, how fast it writes,
 // and the jobs. Shared by the menu-bar panel and the dashboard's Now screen, so both
@@ -235,7 +262,7 @@ struct ActivityTile: View {
                 if let job { return "for “\(job)”" }
                 return status.activity == .idle ? "Waiting for a request" : nil
             }
-        case .stopped: return "Start it from More, or run a job"
+        case .stopped: return "It loads when you start it or a job needs it"
         default: return nil
         }
     }
@@ -380,6 +407,14 @@ struct MenuPanel: View {
                 Text("Qwen3.8 Flash-Next").font(.caption).foregroundStyle(.secondary)
             }
             ActivityTile(status: status)
+            if status.state == .stopped {
+                Button { status.run("start") } label: {
+                    Label("Start the model", systemImage: "play.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+                Text("Takes about a minute. Needs the model's drive connected.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if status.state == .ready {
                 MemoryTile(status: status)
                 SpeedTile(status: status)
@@ -415,6 +450,37 @@ struct MoreMenu: View {
         Button("Support Bundle") { status.run("bundle") }
         if !status.jobs.daemonInstalled {
             Button("Run Jobs Overnight") { status.run("jobs", "daemon", "start") }
+        }
+        Divider()
+        Toggle("Open Slotkeeper at Login", isOn: Binding(
+            get: { LoginItem.isOn }, set: { LoginItem.set($0) }))
+        Toggle("Stop the Model When Idle (30 min)", isOn: Binding(
+            get: { IdleStop.isOn }, set: { status.run("idle", $0 ? "start" : "stop") }))
+    }
+}
+
+/// The two switches, with what they mean, for the dashboard's Advanced › Settings.
+struct SettingsTile: View {
+    @ObservedObject var status: StatusModel
+    @State private var openAtLogin = LoginItem.isOn
+    @State private var idleStop = IdleStop.isOn
+    @State private var note: String?
+
+    var body: some View {
+        Tile(title: "Settings", symbol: "gearshape") {
+            Toggle("Open Slotkeeper at login", isOn: $openAtLogin)
+                .onChange(of: openAtLogin) { _, on in
+                    note = LoginItem.set(on)
+                    openAtLogin = LoginItem.isOn
+                }
+            Text("Puts the menu-bar item back after you log in. Off: open Slotkeeper yourself when you want it.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Stop the model after 30 minutes without requests", isOn: $idleStop)
+                .onChange(of: idleStop) { _, on in status.run("idle", on ? "start" : "stop") }
+            Text("Frees its memory when you are done. Start it again from the menu; a queued job starts it by itself.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("The model never loads at login.").font(.caption).foregroundStyle(.secondary)
+            if let note { Text(note).font(.caption).foregroundStyle(.orange) }
         }
     }
 }

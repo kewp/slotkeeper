@@ -152,13 +152,36 @@ def blocked(respect_window=True):
     level = sh(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()
     if level == "4":
         return "memory pressure critical"
-    if not server_ready():
-        return "server not ready"
     if respect_window and not in_hours():
         idle = user_idle_minutes()
         if not (IDLE_MIN > 0 and idle is not None and idle >= IDLE_MIN):
             return f"outside the job window ({HOURS})" + (f" and you were active {idle:.0f} min ago" if idle is not None else "")
+    # Last, so the server is only started for a job that may otherwise run now.
+    if not server_ready():
+        return SERVER_DOWN
     return None
+
+
+SERVER_DOWN = "server not ready"
+CTL = os.environ.get("SLOTSTREAM_CTL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "slotkeeper"))
+_last_start = [0.0]
+
+
+def start_server():
+    """The server no longer loads at login and stops when idle, so a job that is ready to
+    run starts it. At most once per 10 minutes: a missing drive must not become a loop."""
+    if time.time() - _last_start[0] < 600:
+        return False
+    _last_start[0] = time.time()
+    print("starting the server for a queued job", flush=True)
+    try:
+        out = subprocess.run(["bash", CTL, "start"], capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  could not start it: {e}", flush=True)
+        return False
+    if out.returncode != 0:
+        print("  could not start it: " + ((out.stderr or out.stdout).strip().splitlines() or ["?"])[-1], flush=True)
+    return server_ready()
 
 
 # ---------- running one job ----------
@@ -275,6 +298,8 @@ def run_loop(once=False, respect_window=True, daemon=False):
             time.sleep(60)
             continue
         why = blocked(respect_window)
+        if why == SERVER_DOWN and start_server():
+            why = blocked(respect_window)
         lock = None if why else take_runner_lock()
         if not why and lock is None:
             why = "another runner is running a job"

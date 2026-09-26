@@ -5,8 +5,8 @@
 #   scripts/build-app.sh --dest DIR   install somewhere else
 #   scripts/build-app.sh --open       reveal it in Finder afterwards
 #
-# The LaunchAgent runs the executable inside the bundle, so the menu-bar item, the Dock
-# icon and login start are all the same app. Unsigned: macOS may ask the first time.
+# An ordinary app: it starts at login only if you turn on Open at Login in its menu
+# (SMAppService, which needs the bundle signed, so it is signed ad hoc for this Mac).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="$REPO/Slotkeeper"
@@ -102,6 +102,9 @@ else
   log "could not render the icon; the app keeps the generic icon"
 fi
 
+# Seal the bundle after Info.plist and the icon are in place: an unsealed bundle cannot
+# register as a login item. Ad hoc is enough on the Mac that built it.
+codesign --force --sign - "$APP" >/dev/null 2>&1 && log "signed ad hoc" || log "could not sign; Open at Login will not work"
 touch "$APP"
 log "installed $APP"
 echo "$APP/Contents/MacOS/Slotkeeper"

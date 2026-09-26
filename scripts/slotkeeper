@@ -27,6 +27,7 @@
 #   jobs <add|list|show|cancel|run|report>  Unattended coding tasks for the local model (scripts/jobs.py).
 #   jobs daemon <start|stop|status>         Run queued jobs overnight as a LaunchAgent.
 #   jobs <pause [reason]|resume>            Hold the runner without unloading it.
+#   idle <start|stop|status>                Stop the server after SLOTKEEPER_IDLE_STOP_MIN (30) idle minutes.
 #   calibrate [--quick|--show|--window N]   Measure what this machine handles and write the verdict
 #                       to ~/.slotstream/calibration.json (restarts the server; not while you work).
 #   capacity [--window N|--ram N]           What a window costs in memory, from the planner's ledger.
@@ -79,6 +80,12 @@ LOG="$SLOTSTREAM_HOME/slotstream.log"
 PROFILE_FILE="$SLOTSTREAM_HOME/profile"
 PID_FILE="$SLOTSTREAM_HOME/slotstream.pid"
 NO_DEGRADE_FILE="$SLOTSTREAM_HOME/no-degrade"
+# Present while someone wants the server: start and install-agent create it, stop and the
+# idle stop remove it. launchd runs `run` at every login (KeepAlive/SuccessfulExit implies
+# RunAtLoad), so without it the model would load at login; run exits cleanly instead, and a
+# crash, which leaves it in place, is still restarted.
+WANTED_FILE="$SLOTSTREAM_HOME/server.wanted"
+IDLE_LABEL="local.slotkeeper-idle"
 AGENT_LABEL="local.slotkeeper"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 BASE="http://127.0.0.1:$SLOTSTREAM_PORT"
@@ -273,9 +280,22 @@ warn_profile_mismatch() {
   fi
 }
 
+# The weights live on an external drive (models/ holds a symlink to it). Without them the
+# server cannot start, and that is not a reason to fall back to other settings.
+check_model() {
+  local dir="$SLOTSTREAM_MODEL"
+  [[ "$dir" == */* ]] || dir="$SLOTSTREAM_HOME/models/qwen38-flash-next-mlx-4bit"
+  [[ -f "$dir/config.json" ]] || die "the model is not at $dir (is its drive connected?)"
+}
+
 cmd_run() {
   local context; context="$(resolve_profile "${1:-}")"
+  if [[ "${XPC_SERVICE_NAME:-}" == "$AGENT_LABEL" && ! -f "$WANTED_FILE" ]]; then
+    log "not starting: nothing has asked for the server (menu Start, slotkeeper start, or a job)"
+    exit 0
+  fi
   [[ -x "$SLOTSTREAM_BIN" ]] || die "no executable at $SLOTSTREAM_BIN"
+  check_model
   check_port; check_disk
   warn_profile_mismatch "$context"
   fit_memory_target "$context"
@@ -314,6 +334,8 @@ cmd_start() {
   # launchd does not inherit our environment, so tell cmd_run whether this start is a
   # measurement that must not be degraded (see fit_memory_target).
   if [[ "${SLOTKEEPER_NO_FALLBACK:-0}" == 1 ]]; then : > "$NO_DEGRADE_FILE"; else rm -f "$NO_DEGRADE_FILE"; fi
+  check_model
+  touch "$WANTED_FILE"
   if [[ -f "$AGENT_PLIST" ]]; then
     log "LaunchAgent is installed; starting through launchd"
     [[ -n "${1:-}" ]] && echo "$1" > "$PROFILE_FILE"
@@ -346,6 +368,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+  rm -f "$WANTED_FILE"
   local pids; pids="$(server_pids)"
   if launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
     # Unload the job so KeepAlive cannot respawn it; `start` bootstraps it again. launchd sends
@@ -456,10 +479,46 @@ cmd_install_agent() {
     log "a server started outside launchd is running; stop it first so launchd can own the process"
     exit 1
   fi
+  check_model
+  touch "$WANTED_FILE"
   launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"
   log "installed $AGENT_PLIST"
   cmd_wait_ready 180
+}
+
+# Stop the server after SLOTKEEPER_IDLE_STOP_MIN minutes (default 30; 0 = never) without a
+# request, so its memory comes back. Activity is the server log: it writes a line when a
+# request arrives, every 15 s while one runs, and when it ends; the menu bar's polling does
+# not write there. A running job or calibration counts as busy even between requests.
+cmd_idle_watch() {
+  local limit="${SLOTKEEPER_IDLE_STOP_MIN:-30}" last started now idle
+  (( limit > 0 )) || { log "idle stop is off (SLOTKEEPER_IDLE_STOP_MIN=0)"; exit 0; }
+  log "watching: the server stops after ${limit} min without requests"
+  while true; do
+    sleep 60
+    [[ -f "$WANTED_FILE" && -n "$(server_pids)" ]] || continue
+    compgen -G "$SLOTSTREAM_HOME/jobs/running/*.json" >/dev/null && continue
+    pgrep -f "calibrate.py" >/dev/null && continue
+    last="$(stat -f %m "$LOG" 2>/dev/null || echo 0)"
+    started="$(stat -f %m "$WANTED_FILE" 2>/dev/null || echo 0)"
+    (( started > last )) && last="$started"
+    now="$(date +%s)"; idle=$(( (now - last) / 60 ))
+    if (( idle >= limit )); then
+      log "no requests for ${idle} min: stopping the server to free its memory"
+      cmd_stop
+    fi
+  done
+}
+
+cmd_idle() {
+  case "${1:-status}" in
+    start) install_side_agent "$IDLE_LABEL" "$SCRIPT_DIR/slotkeeper" "$SLOTSTREAM_HOME/idle.log" idle watch ;;
+    stop) remove_side_agent "$IDLE_LABEL" ;;
+    watch) cmd_idle_watch ;;
+    status) echo "idle stop: $(agent_installed "$IDLE_LABEL" && echo "on, after ${SLOTKEEPER_IDLE_STOP_MIN:-30} min" || echo "off")" ;;
+    *) die "idle start|stop|status" ;;
+  esac
 }
 
 cmd_uninstall_agent() {
@@ -517,20 +576,26 @@ remove_side_agent() {
 }
 
 cmd_bar() {
-  # The app is a real bundle in ~/Applications; the LaunchAgent starts the executable
-  # inside it, so the Dock icon, the menu-bar item and login start are one app.
-  local label="local.slotkeeper-bar" bin
+  # The app is an ordinary bundle in ~/Applications. It used to run under a KeepAlive
+  # LaunchAgent, which started it at every login and relaunched it after Quit; now it
+  # starts at login only when Open at Login is on in its menu (a system login item).
+  local label="local.slotkeeper-bar" bin app
   case "${1:-status}" in
     install|restart)
       bin="$("$SCRIPT_DIR/build-app.sh" | tail -1)"
       [[ -x "$bin" ]] || die "build-app.sh did not produce an executable"
+      app="${bin%/Contents/MacOS/Slotkeeper}"
+      agent_installed "$label" || [[ -f "$HOME/Library/LaunchAgents/$label.plist" ]] && remove_side_agent "$label"
       pkill -x Slotkeeper 2>/dev/null || true
-      # At login it should stay out of the way; opened by hand it shows its window.
-      SIDE_AGENT_TYPE=Interactive SIDE_AGENT_NICE=0 SIDE_AGENT_ENV="SLOTKEEPER_BACKGROUND=1" \
-        install_side_agent "$label" "$bin" "$SLOTSTREAM_HOME/slotkeeper-bar.log"
+      sleep 1
+      # In the background, as at login; opened by hand it shows its window.
+      open --env SLOTKEEPER_BACKGROUND=1 "$app" && log "started $app"
       ;;
-    uninstall) remove_side_agent "$label"; pkill -x Slotkeeper 2>/dev/null || true ;;
-    status) echo "bar: $(agent_installed "$label" && echo launchd || echo "not installed") $(pgrep -x Slotkeeper | head -1 | sed 's/^/pid /')" ;;
+    uninstall)
+      remove_side_agent "$label" 2>/dev/null || true
+      pkill -x Slotkeeper 2>/dev/null || true
+      log "quit Slotkeeper; turn off Open at Login in its menu first if you had it on" ;;
+    status) echo "bar: $(pgrep -x Slotkeeper >/dev/null && echo "running (pid $(pgrep -x Slotkeeper | head -1))" || echo "not running")" ;;
     *) die "bar install|uninstall|restart|status" ;;
   esac
 }
@@ -596,6 +661,7 @@ case "${1:-}" in
   bar) cmd_bar "${2:-status}" ;;
   monitor) cmd_monitor "${2:-status}" ;;
   jobs) cmd_jobs "${@:2}" ;;
+  idle) cmd_idle "${2:-status}" ;;
   calibrate)
     case "${2:-}" in
       auto)

@@ -10,7 +10,9 @@
     <string>__CTL__</string>
     <string>run</string>
   </array>
-  <!-- Start at login. Set to false to keep a manual `slotkeeper start`. -->
+  <!-- launchd runs `slotkeeper run` at every login (KeepAlive/SuccessfulExit implies it),
+       but run exits cleanly unless ~/.slotstream/server.wanted exists, which only start,
+       install-agent and a queued job create. So the model loads on request, not at login. -->
   <key>RunAtLoad</key>
   <true/>
   <!-- Restart only after a crash (non-zero exit). A clean SIGTERM stop stays stopped. -->

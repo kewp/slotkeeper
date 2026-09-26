@@ -36,12 +36,13 @@ struct DashboardView: View {
     @State private var budget: BudgetTables?
     @State private var attempts: [CalibrationAttempt] = []
     @State private var hours = 24.0
-    @State private var advancedSection = "Verdict"
+    @State private var advancedSection = "Settings"
 
-    static let advancedSections = ["Verdict", "Capacity", "Measurements", "System", "Server", "Health"]
+    static let advancedSections = ["Settings", "Verdict", "Capacity", "Measurements", "System", "Server", "Health"]
 
     @ViewBuilder private var advanced: some View {
         switch advancedSection {
+        case "Settings": SettingsTile(status: status)
         case "Capacity": capacityTab
         case "Measurements": attemptsTab
         case "System": systemTab
